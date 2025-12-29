@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import http from 'http';
 import { Telegraf, Markup } from 'telegraf';
 import { createClient } from '@supabase/supabase-js';
 
@@ -17,7 +18,7 @@ if (!BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 }
 
 const adminIds = ADMIN_TELEGRAM_IDS.split(',')
-  .map(s => s.trim())
+  .map((s) => s.trim())
   .filter(Boolean)
   .map(Number);
 
@@ -99,7 +100,12 @@ async function upsertUser(ctx) {
     return existing.id;
   }
 
-  const { data: inserted, error: e3 } = await supabase.from('users').insert(payload).select('id').single();
+  const { data: inserted, error: e3 } = await supabase
+    .from('users')
+    .insert(payload)
+    .select('id')
+    .single();
+
   if (e3) throw e3;
   return inserted.id;
 }
@@ -135,7 +141,9 @@ bot.start(async (ctx) => {
       await ctx.reply(cashbackMessage(), mainMenu);
     } else {
       await ctx.reply(
-        `Ciao! 👋\nApri il link dal canale per partecipare al cashback.\n${PUBLIC_CHANNEL_URL ? `Canale: ${PUBLIC_CHANNEL_URL}` : ''}`
+        `Ciao! 👋\nApri il link dal canale per partecipare al cashback.\n${
+          PUBLIC_CHANNEL_URL ? `Canale: ${PUBLIC_CHANNEL_URL}` : ''
+        }`
       );
     }
   } catch (err) {
@@ -318,16 +326,20 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
   }
 });
 
-import http from 'http';
-
+/**
+ * Mini server HTTP per Render (Web Service gratuito).
+ * Render richiede una porta aperta per considerare il servizio "healthy".
+ */
 const PORT = process.env.PORT || 3000;
 
-http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Bot is running');
-}).listen(PORT, () => {
-  console.log(`HTTP server listening on port ${PORT}`);
-});
+http
+  .createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Bot is running');
+  })
+  .listen(PORT, () => {
+    console.log(`HTTP server listening on port ${PORT}`);
+  });
 
 bot.launch();
 console.log('Bot started');
