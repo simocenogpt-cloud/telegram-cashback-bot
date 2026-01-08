@@ -7,8 +7,7 @@ const {
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY,
   ADMIN_TELEGRAM_IDS = '',
-  AFFILIATE_LINK = '',
-  PUBLIC_CHANNEL_URL = ''
+  PUBLIC_CHANNEL_URL = '' // link invito canale VIP (anche privato)
 } = process.env;
 
 if (!BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
@@ -17,64 +16,78 @@ if (!BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 }
 
 const adminIds = ADMIN_TELEGRAM_IDS.split(',')
-  .map((s) => s.trim())
+  .map(s => s.trim())
   .filter(Boolean)
   .map(Number);
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const bot = new Telegraf(BOT_TOKEN);
 
-// --- Template messaggio cashback ---
+// ===============================
+// CONFIG (testi + link bookmakers)
+// ===============================
+const BOOKMAKERS = [
+  { name: 'Eurobet', url: 'https://record.betpartners.it/_Klv9utJ3bqpKqXDxdQZqW2Nd7ZgqdRLk/1/' },
+  { name: 'bwin', url: 'https://www.bwin.it/it/engage/lan/s/p/sports/accaboost?wm=5596580' },
+  { name: 'Betsson', url: 'https://record.betsson.it/_dYA2EWAR45qw8pi7H3I6R2Nd7ZgqdRLk/1/' },
+  { name: 'Starcasino', url: 'https://record.starcasino.it/_dYA2EWAR45rPSO5RLscKcGNd7ZgqdRLk/1/' }
+];
+
+const PRIZES_TEXT = `🎁 Premi disponibili (buoni regalo):
+• Amazon
+• Zalando
+• Airbnb
+• Apple
+• Spotify`;
+
 function cashbackMessage() {
-  return `🔥 Cashback immediato: Depositi 10€, ricevi 10€ indietro 🔥
+  const links = BOOKMAKERS.map(b => `• ${b.name}: ${b.url}`).join('\n');
 
-Come funziona:
-1️⃣ Registrati su Snai tramite questo link: ${AFFILIATE_LINK || '___'}
-2️⃣ Effettua un deposito di almeno 10€
-3️⃣ Invia qui i seguenti dati:
-• Nome e cognome
-• Email usata per la registrazione
-• Username / ID conto Snai
-• Screenshot del deposito (importo, data e username)
-• PayPal/Revolut indirizzo per ricevere il cashback
+  return `🔥 Richiesta accesso VIP + Premi 🔥
 
-Supporto:
-Se hai dubbi su verifica, tempi o cosa inviare, scrivi qui: ti risponde una persona reale.
+Per partecipare:
+1️⃣ Registrati su UNO di questi link:
+${links}
 
-Verifica e pagamento:
-Una volta controllate le informazioni, il cashback verrà inviato.
-⏱️ Entro 72 ore (PayPal / Revolut)
+2️⃣ Effettua un deposito (seguendo le regole della promo/link)
+3️⃣ Invia qui i dati richiesti + screenshot deposito
+
+${PRIZES_TEXT}
+
+⏱️ Verifica: entro 72 ore.
+✅ Se la richiesta viene approvata, riceverai il link per entrare nel canale VIP.
 
 Regole:
-– Promo valida solo se usi questo link
-– Cashback solo sul primo deposito
+– Valido solo se usi uno dei link sopra
 – Una sola partecipazione per persona
 – Screenshot falsi o modificati = esclusione immediata`;
 }
 
+// ===============================
+// UI (pulsanti)
+// ===============================
 const mainMenu = Markup.inlineKeyboard([
-  [Markup.button.callback('✅ Invia dati cashback', 'START_FLOW')],
+  [Markup.button.callback('✅ Invia richiesta', 'START_FLOW')],
   [Markup.button.callback('🆘 Supporto', 'SUPPORT')]
 ]);
 
-const payoutMenu = Markup.inlineKeyboard([
-  [Markup.button.callback('PayPal', 'PAYOUT_paypal'), Markup.button.callback('Revolut', 'PAYOUT_revolut')],
-  [Markup.button.callback('↩️ Annulla', 'CANCEL_FLOW')]
-]);
-
 const confirmMenu = Markup.inlineKeyboard([
-  [Markup.button.callback('📩 Invia richiesta', 'SUBMIT')],
+  [Markup.button.callback('📩 Invia', 'SUBMIT')],
   [Markup.button.callback('✏️ Modifica', 'EDIT')],
   [Markup.button.callback('↩️ Annulla', 'CANCEL_FLOW')]
 ]);
 
-// --- Stato in memoria (ok per iniziare) ---
+// ===============================
+// Stato in memoria
+// ===============================
 const state = new Map(); // telegram_id -> { step, requestId }
 const setState = (tid, data) => state.set(tid, { ...(state.get(tid) || {}), ...data });
 const getState = (tid) => state.get(tid) || {};
 const clearState = (tid) => state.delete(tid);
 
-// --- Helpers DB ---
+// ===============================
+// DB helpers
+// ===============================
 async function upsertUser(ctx) {
   const u = ctx.from;
 
@@ -111,7 +124,6 @@ async function createDraftRequest(userId, campaign) {
     .insert({ user_id: userId, campaign })
     .select('id')
     .single();
-
   if (error) throw error;
   return data.id;
 }
@@ -127,39 +139,45 @@ async function getRequest(id) {
   return data;
 }
 
-// --- START con deep link ---
+async function setStatus(id, status, admin_note = null) {
+  const patch = { status };
+  if (admin_note !== null) patch.admin_note = admin_note;
+  if (status === 'SUBMITTED') patch.submitted_at = new Date().toISOString();
+  await updateRequest(id, patch);
+}
+
+// ===============================
+// START (deep link)
+// ===============================
 bot.start(async (ctx) => {
   try {
     await upsertUser(ctx);
-    const payload = (ctx.startPayload || '').trim(); // es: cashback_snai
 
+    const payload = (ctx.startPayload || '').trim(); // es: cashback_snai
     if (payload === 'cashback_snai') {
       await ctx.reply(cashbackMessage(), mainMenu);
-      return;
+    } else {
+      await ctx.reply(cashbackMessage(), mainMenu);
     }
-
-    await ctx.reply(
-      `Ciao! 👋\nApri il link dal canale per partecipare al cashback.\n${
-        PUBLIC_CHANNEL_URL ? `Canale: ${PUBLIC_CHANNEL_URL}` : ''
-      }`
-    );
   } catch (err) {
-    console.error('START error:', err);
+    console.error(err);
     await ctx.reply('Errore temporaneo. Riprova tra poco.');
   }
 });
 
-// --- Pulsanti ---
+// ===============================
+// Pulsanti utente
+// ===============================
 bot.action('START_FLOW', async (ctx) => {
   try {
     await ctx.answerCbQuery();
     const userId = await upsertUser(ctx);
-    const requestId = await createDraftRequest(userId, 'cashback_snai');
+    const requestId = await createDraftRequest(userId, 'vip_access');
 
     setState(ctx.from.id, { step: 'FULL_NAME', requestId });
     await ctx.reply('Perfetto ✅\n\nInserisci *Nome e Cognome*:', { parse_mode: 'Markdown' });
   } catch (err) {
-    console.error('START_FLOW error:', err);
+    console.error(err);
     await ctx.reply('Errore. Riprova tra poco.');
   }
 });
@@ -169,33 +187,17 @@ bot.action('SUPPORT', async (ctx) => {
   await ctx.reply('Scrivimi pure qui il tuo problema: ti risponderà un operatore appena possibile.');
 });
 
-bot.action(/PAYOUT_(.+)/, async (ctx) => {
-  try {
-    await ctx.answerCbQuery();
-    const method = ctx.match[1];
-    const st = getState(ctx.from.id);
-    if (!st.requestId) return ctx.reply('Sessione scaduta. Premi “Invia dati cashback” per ripartire.');
-
-    await updateRequest(st.requestId, { payout_method: method });
-    setState(ctx.from.id, { step: 'PAYOUT_ADDRESS' });
-
-    await ctx.reply(`Ok. Ora inserisci l’indirizzo ${method.toUpperCase()} (email o ID):`);
-  } catch (err) {
-    console.error('PAYOUT error:', err);
-    await ctx.reply('Errore. Riprova.');
-  }
-});
-
 bot.action('CANCEL_FLOW', async (ctx) => {
   await ctx.answerCbQuery();
   clearState(ctx.from.id);
-  await ctx.reply('Operazione annullata. Se vuoi ripartire, premi “✅ Invia dati cashback”.', mainMenu);
+  await ctx.reply('Operazione annullata. Se vuoi ripartire, premi “✅ Invia richiesta”.', mainMenu);
 });
 
 bot.action('EDIT', async (ctx) => {
   await ctx.answerCbQuery();
   const st = getState(ctx.from.id);
   if (!st.requestId) return ctx.reply('Sessione scaduta. Riparti dal menu.', mainMenu);
+
   setState(ctx.from.id, { step: 'FULL_NAME' });
   await ctx.reply('Ok, reinserisci *Nome e Cognome*:', { parse_mode: 'Markdown' });
 });
@@ -206,37 +208,121 @@ bot.action('SUBMIT', async (ctx) => {
     const st = getState(ctx.from.id);
     if (!st.requestId) return ctx.reply('Sessione scaduta. Riparti dal menu.', mainMenu);
 
-    await updateRequest(st.requestId, { status: 'SUBMITTED', submitted_at: new Date().toISOString() });
+    await setStatus(st.requestId, 'SUBMITTED');
     const req = await getRequest(st.requestId);
 
+    // Notifica admin con tasti Approva/Rifiuta
     const adminText =
-      `🧾 *Nuova richiesta cashback*\n` +
+      `🧾 *Nuova richiesta VIP*\n` +
       `ID: ${req.id}\n` +
-      `User: @${ctx.from.username || 'n/a'} (${ctx.from.id})\n` +
+      `User TG: @${ctx.from.username || 'n/a'} (${ctx.from.id})\n` +
       `Nome: ${req.full_name || '-'}\n` +
       `Email: ${req.email || '-'}\n` +
-      `Username: ${req.username || '-'}\n` +
-      `Deposito: ${req.deposit_amount ?? '-'}\n` +
-      `Pagamento: ${req.payout_method || '-'} → ${req.payout_address || '-'}\n` +
-      `Screenshot: ${req.screenshot_file_id ? '✅ presente' : '❌ mancante'}`;
+      `Username bookmaker: ${req.username || '-'}\n` +
+      `Screenshot: ${req.screenshot_file_id ? '✅ presente' : '❌ mancante'}\n\n` +
+      `${PRIZES_TEXT}`;
+
+    const adminKeyboard = Markup.inlineKeyboard([
+      [
+        Markup.button.callback('✅ Approva', `ADMIN_APPROVE_${req.id}`),
+        Markup.button.callback('❌ Rifiuta', `ADMIN_REJECT_${req.id}`)
+      ]
+    ]);
 
     for (const aid of adminIds) {
       try {
-        await bot.telegram.sendMessage(aid, adminText, { parse_mode: 'Markdown' });
+        await bot.telegram.sendMessage(aid, adminText, { parse_mode: 'Markdown', ...adminKeyboard });
       } catch (e) {
-        console.error('Admin notify error:', aid, e?.message || e);
+        console.error('Admin notify failed:', e);
       }
     }
 
     clearState(ctx.from.id);
     await ctx.reply('✅ Richiesta inviata! Ti aggiorniamo dopo la verifica (entro 72 ore).');
   } catch (err) {
-    console.error('SUBMIT error:', err);
+    console.error(err);
     await ctx.reply('Errore durante invio. Riprova.');
   }
 });
 
-// --- Gestione step (testo/foto/file) ---
+// ===============================
+// Admin Approva / Rifiuta
+// ===============================
+function isAdmin(ctx) {
+  return adminIds.includes(Number(ctx.from?.id));
+}
+
+bot.action(/ADMIN_APPROVE_(\d+)/, async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+    if (!isAdmin(ctx)) return ctx.reply('Non autorizzato.');
+
+    const requestId = Number(ctx.match[1]);
+    const req = await getRequest(requestId);
+
+    // aggiorna stato
+    await setStatus(requestId, 'APPROVED');
+
+    // manda link VIP all'utente
+    if (!PUBLIC_CHANNEL_URL) {
+      await ctx.reply('⚠️ PUBLIC_CHANNEL_URL non configurato su Render (Environment).');
+      return;
+    }
+
+    // Recupera telegram_id dell'utente dalla tabella users
+    const { data: userRow, error } = await supabase
+      .from('users')
+      .select('telegram_id')
+      .eq('id', req.user_id)
+      .single();
+    if (error) throw error;
+
+    const userTelegramId = userRow.telegram_id;
+
+    await bot.telegram.sendMessage(
+      userTelegramId,
+      `✅ Richiesta approvata!\n\nEcco il link per entrare nel canale VIP:\n${PUBLIC_CHANNEL_URL}`
+    );
+
+    await ctx.editMessageReplyMarkup({ inline_keyboard: [] }).catch(() => {});
+    await ctx.reply(`✅ Approvato (ID ${requestId}). Link inviato all’utente.`);
+  } catch (err) {
+    console.error(err);
+    await ctx.reply('Errore durante approvazione.');
+  }
+});
+
+bot.action(/ADMIN_REJECT_(\d+)/, async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+    if (!isAdmin(ctx)) return ctx.reply('Non autorizzato.');
+
+    const requestId = Number(ctx.match[1]);
+    const req = await getRequest(requestId);
+
+    await setStatus(requestId, 'REJECTED', 'Rifiutata da admin');
+
+    // Recupera telegram_id utente
+    const { data: userRow, error } = await supabase
+      .from('users')
+      .select('telegram_id')
+      .eq('id', req.user_id)
+      .single();
+    if (error) throw error;
+
+    await bot.telegram.sendMessage(userRow.telegram_id, '❌ Richiesta rifiutata. Se pensi sia un errore, rispondi qui per supporto.');
+
+    await ctx.editMessageReplyMarkup({ inline_keyboard: [] }).catch(() => {});
+    await ctx.reply(`❌ Rifiutato (ID ${requestId}). Notifica inviata all’utente.`);
+  } catch (err) {
+    console.error(err);
+    await ctx.reply('Errore durante rifiuto.');
+  }
+});
+
+// ===============================
+// Flusso: testo/foto/file
+// ===============================
 bot.on(['text', 'photo', 'document'], async (ctx) => {
   const tid = ctx.from.id;
   const st = getState(tid);
@@ -256,22 +342,13 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
       if (!email.includes('@')) return ctx.reply('Email non valida. Reinserisci:');
       await updateRequest(st.requestId, { email });
       setState(tid, { step: 'USERNAME' });
-      return ctx.reply('Inserisci *Username / ID Snai*:', { parse_mode: 'Markdown' });
+      return ctx.reply('Inserisci *Username / ID* usato sul bookmaker (quello del conto):', { parse_mode: 'Markdown' });
     }
 
     if (st.step === 'USERNAME') {
       const uname = (ctx.message.text || '').trim();
       if (uname.length < 2) return ctx.reply('Valore non valido. Reinserisci Username/ID:');
       await updateRequest(st.requestId, { username: uname });
-      setState(tid, { step: 'DEPOSIT' });
-      return ctx.reply('Inserisci importo deposito (solo numero, es. 10):');
-    }
-
-    if (st.step === 'DEPOSIT') {
-      const raw = (ctx.message.text || '').trim().replace(',', '.');
-      const val = Number(raw);
-      if (!Number.isFinite(val) || val <= 0) return ctx.reply('Importo non valido. Inserisci ad esempio 10:');
-      await updateRequest(st.requestId, { deposit_amount: val });
       setState(tid, { step: 'SCREENSHOT' });
       return ctx.reply('Ora invia *lo screenshot del deposito* (foto o file).', { parse_mode: 'Markdown' });
     }
@@ -291,25 +368,15 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
       }
 
       await updateRequest(st.requestId, { screenshot_file_id: fileId, screenshot_mime: mime });
-      setState(tid, { step: 'PAYOUT_METHOD' });
-      return ctx.reply('Scegli il metodo di pagamento:', payoutMenu);
-    }
-
-    if (st.step === 'PAYOUT_ADDRESS') {
-      const addr = (ctx.message.text || '').trim();
-      if (addr.length < 3) return ctx.reply('Indirizzo non valido. Reinserisci:');
-      await updateRequest(st.requestId, { payout_address: addr });
 
       const req = await getRequest(st.requestId);
       const summary =
         `📋 *Riepilogo richiesta*\n` +
         `Nome: ${req.full_name}\n` +
         `Email: ${req.email}\n` +
-        `Username: ${req.username}\n` +
-        `Deposito: ${req.deposit_amount}\n` +
-        `Pagamento: ${req.payout_method?.toUpperCase()} → ${req.payout_address}\n` +
+        `Username bookmaker: ${req.username}\n` +
         `Screenshot: ${req.screenshot_file_id ? '✅' : '❌'}\n\n` +
-        `Se è tutto corretto, premi “📩 Invia richiesta”.`;
+        `Se è tutto corretto, premi “📩 Invia”.`;
 
       setState(tid, { step: 'CONFIRM' });
       return ctx.reply(summary, { parse_mode: 'Markdown', ...confirmMenu });
@@ -319,32 +386,29 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
       return ctx.reply('Usa i pulsanti sotto per inviare/modificare.', confirmMenu);
     }
   } catch (err) {
-    console.error('FLOW error:', err);
+    console.error(err);
     await ctx.reply('Errore durante la compilazione. Riprova dal menu.', mainMenu);
     clearState(tid);
   }
 });
 
-// --- Avvio robusto su Render Worker ---
+// ===============================
+// Avvio bot (Background Worker)
+// ===============================
 async function start() {
   try {
-    // Se per sbaglio avevi impostato un webhook in passato, lo togliamo.
-    // drop_pending_updates pulisce la coda.
+    // pulisce eventuali webhook e update pendenti
     await bot.telegram.deleteWebhook({ drop_pending_updates: true });
 
     await bot.launch({ dropPendingUpdates: true });
-    console.log('Bot started (polling).');
-  } catch (err) {
-    console.error('FATAL start error:', err);
-    // Se c’è ancora una seconda istanza attiva, vedrai 409 qui.
+    console.log('Bot started');
+  } catch (e) {
+    console.error('FATAL start error:', e);
     process.exit(1);
   }
 }
 
 start();
 
-// --- Shutdown pulito ---
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
-process.on('unhandledRejection', (err) => console.error('unhandledRejection:', err));
-process.on('uncaughtException', (err) => console.error('uncaughtException:', err));
