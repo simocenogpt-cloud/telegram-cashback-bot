@@ -353,12 +353,24 @@ bot.action(/ADMIN_APPROVE_(\d+)/, async (ctx) => {
       return ctx.reply('⚠️ PUBLIC_CHANNEL_URL non configurato (Render → Environment).');
     }
 
-    // invia link all'utente
-    await bot.telegram.sendMessage(
-      userTelegramId,
-      `✅ Richiesta approvata!\n\nLink per entrare nel canale VIP:\n${PUBLIC_CHANNEL_URL}\n\n` +
-        `⚠️ Nota: non posso inserirti automaticamente, devi cliccare il link ed entrare.`
-    );
+// Crea un link di invito personale (1 solo accesso)
+const invite = await bot.telegram.createChatInviteLink(
+  PUBLIC_CHANNEL_URL,
+  {
+    member_limit: 1,
+    expire_date: Math.floor(Date.now() / 1000) + 60 * 60 * 24 // 24 ore (opzionale)
+  }
+);
+
+await bot.telegram.sendMessage(
+  userTelegramId,
+  `✅ Richiesta approvata!\n\n` +
+  `🔐 Questo è il TUO link personale per entrare nel canale VIP.\n` +
+  `⚠️ È valido per una sola persona e non può essere condiviso:\n\n` +
+  `${invite.invite_link}\n\n` +
+  `⏳ Il link scade tra 24 ore.`
+);
+
 
     // rimuove bottoni
     await ctx.editMessageReplyMarkup({ inline_keyboard: [] }).catch(() => {});
