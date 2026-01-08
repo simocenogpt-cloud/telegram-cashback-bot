@@ -34,7 +34,8 @@ if (!BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 const adminIds = ADMIN_TELEGRAM_IDS.split(',')
   .map((s) => s.trim())
   .filter(Boolean)
-  .map(Number);
+  .map((n) => Number(n))
+  .filter((n) => Number.isFinite(n));
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const bot = new Telegraf(BOT_TOKEN);
@@ -99,7 +100,7 @@ const setUserState = (tid, data) => stateUser.set(tid, { ...(stateUser.get(tid) 
 const getUserState = (tid) => stateUser.get(tid) || {};
 const clearUserState = (tid) => stateUser.delete(tid);
 
-// stateAdmin: admin_id -> { mode: 'ASK_INFO', requestId }
+// stateAdmin: admin_id -> { mode: 'ASK_INFO', requestId, userTelegramId }
 const stateAdmin = new Map();
 const setAdminState = (aid, data) => stateAdmin.set(aid, { ...(stateAdmin.get(aid) || {}), ...data });
 const getAdminState = (aid) => stateAdmin.get(aid) || {};
@@ -113,11 +114,18 @@ function isAdmin(ctx) {
 }
 
 function safeText(s) {
-  // We will NOT use Markdown to avoid parse errors with usernames/underscores.
-  // This is just a small sanitization.
-  return String(s ?? '').replace(/\u0000/g, '');
+  return String(s ?? '').replace(/\u0000/g, '').trim();
 }
 
+function truncateCaption(s, max = 900) {
+  const text = safeText(s);
+  if (text.length <= max) return text;
+  return text.slice(0, max - 1) + '…';
+}
+
+// ===============================
+// DB helpers
+// ===============================
 async function upsertUser(ctx) {
   const u = ctx.from;
   const payload = {
@@ -185,10 +193,13 @@ async function setStatus(requestId, status, admin_note = null) {
   await updateRequest(requestId, patch);
 }
 
+// ===============================
+// ADMIN notify (QUI: screenshot + bottoni nello stesso messaggio ✅)
+// ===============================
 async function notifyAdminsNewRequest(ctxUser, req) {
   const tgUsername = ctxUser.from.username ? `@${ctxUser.from.username}` : 'n/a';
 
-  const adminText =
+  const caption =
     `🧾 Nuova richiesta VIP\n` +
     `ID: ${req.id}\n` +
     `User TG: ${tgUsername} (${ctxUser.from.id})\n` +
@@ -208,63 +219,37 @@ async function notifyAdminsNewRequest(ctxUser, req) {
 
   for (const aid of adminIds) {
     try {
-      await bot.telegram.sendMessage(aid, adminText, { reply_markup: adminKeyboard.reply_markup });
+      // Se c'è screenshot, prova a mandarlo come FOTO con bottoni (meglio per l'admin)
+      if (req.screenshot_file_id) {
+        const cap = truncateCaption(caption, 900);
 
-      // Se c'è screenshot, invialo anche come media (molto più comodo per l'admin)
-      async function notifyAdminsNewRequest(ctxUser, req) {
-        const tgUsername = ctxUser.from.username ? `@${ctxUser.from.username}` : 'n/a';
-      
-        const adminText =
-          `🧾 Nuova richiesta VIP\n` +
-          `ID: ${req.id}\n` +
-          `User TG: ${tgUsername} (${ctxUser.from.id})\n` +
-          `Nome: ${safeText(req.full_name) || '-'}\n` +
-          `Email: ${safeText(req.email) || '-'}\n` +
-          `Username bookmaker: ${safeText(req.username) || '-'}\n` +
-          `Screenshot: ${req.screenshot_file_id ? '✅ presente' : '❌ mancante'}\n\n` +
-          `${PRIZES_TEXT}`;
-      
-        const adminKeyboard = Markup.inlineKeyboard([
-          [
-            Markup.button.callback('✅ Approva', `ADMIN_APPROVE_${req.id}`),
-            Markup.button.callback('❌ Rifiuta', `ADMIN_REJECT_${req.id}`)
-          ],
-          [Markup.button.callback('💬 Chiedi info', `ADMIN_ASK_${req.id}`)]
-        ]);
-      
-        for (const aid of adminIds) {
+        // 1) prova come foto
+        try {
+          await bot.telegram.sendPhoto(aid, req.screenshot_file_id, {
+            caption: cap,
+            reply_markup: adminKeyboard.reply_markup
+          });
+          continue;
+        } catch (e1) {
+          // 2) fallback: documento
           try {
-            // 1) Messaggio testuale con bottoni
-            await bot.telegram.sendMessage(aid, adminText, {
+            await bot.telegram.sendDocument(aid, req.screenshot_file_id, {
+              caption: cap,
               reply_markup: adminKeyboard.reply_markup
             });
-      
-            // 2) Media: invia SEMPRE se presente, senza fidarsi troppo del mime
-            if (req.screenshot_file_id) {
-              const caption = `📎 Screenshot deposito — ID richiesta ${req.id}`;
-      
-              try {
-                // Prova come foto (funziona se file_id è di una photo)
-                await bot.telegram.sendPhoto(aid, req.screenshot_file_id, { caption });
-              } catch (e1) {
-                // Se non è una foto (es. PDF/doc), prova come documento
-                try {
-                  await bot.telegram.sendDocument(aid, req.screenshot_file_id, { caption });
-                } catch (e2) {
-                  console.error('Admin screenshot send failed (photo+document):', e1, e2);
-                  await bot.telegram.sendMessage(
-                    aid,
-                    `⚠️ Non sono riuscito a inviare lo screenshot automaticamente (ID richiesta ${req.id}).`
-                  );
-                }
-              }
-            }
-          } catch (e) {
-            console.error('Admin notify failed:', e);
+            continue;
+          } catch (e2) {
+            console.error('Admin screenshot send failed (photo+document):', e1, e2);
+            // 3) fallback finale: solo testo con bottoni
+            await bot.telegram.sendMessage(aid, caption, { reply_markup: adminKeyboard.reply_markup });
+            await bot.telegram.sendMessage(aid, '⚠️ Non sono riuscito a inviare lo screenshot automaticamente (file_id non valido come media).');
+            continue;
           }
         }
       }
-      
+
+      // Se NON c'è screenshot: solo testo con bottoni
+      await bot.telegram.sendMessage(aid, caption, { reply_markup: adminKeyboard.reply_markup });
     } catch (e) {
       console.error('Admin notify failed:', e);
     }
@@ -362,11 +347,11 @@ bot.action(/ADMIN_APPROVE_(\d+)/, async (ctx) => {
 
     await bot.telegram.sendMessage(
       userTelegramId,
-      `✅ Richiesta approvata!\n\nQui sotto trovi il link per entrare nel canale VIP (anche se è privato va benissimo):\n${PUBLIC_CHANNEL_URL}\n\n` +
-      `⚠️ Nota: su Telegram non posso “inserirti automaticamente”, devi cliccare il link ed entrare.`
+      `✅ Richiesta approvata!\n\n` +
+        `Ecco il link per entrare nel canale VIP:\n${PUBLIC_CHANNEL_URL}\n\n` +
+        `Nota: su Telegram non posso inserirti automaticamente, devi cliccare il link ed entrare.`
     );
 
-    // togli bottoni dal messaggio admin (se possibile)
     await ctx.editMessageReplyMarkup({ inline_keyboard: [] }).catch(() => {});
     await ctx.reply(`✅ Approvato (ID ${requestId}). Link inviato all’utente.`);
   } catch (e) {
@@ -409,13 +394,12 @@ bot.action(/ADMIN_ASK_(\d+)/, async (ctx) => {
     const req = await getRequest(requestId);
     const userTelegramId = await getUserTelegramIdByUserId(req.user_id);
 
-    // salva stato: la prossima cosa che scrive l'admin verrà inoltrata all'utente
     setAdminState(ctx.from.id, { mode: 'ASK_INFO', requestId, userTelegramId });
 
     await ctx.reply(
       `💬 Ok. Scrivi ora il messaggio per l’utente (ID richiesta ${requestId}).\n` +
-      `Esempio: “Ciao, puoi mandarmi lo screenshot completo con data visibile?”\n\n` +
-      `Per annullare: scrivi /annulla`
+        `Esempio: “Ciao, puoi mandarmi lo screenshot completo con data visibile?”\n\n` +
+        `Per annullare: scrivi /annulla`
     );
   } catch (e) {
     console.error(e);
@@ -424,16 +408,15 @@ bot.action(/ADMIN_ASK_(\d+)/, async (ctx) => {
 });
 
 // ===============================
-// Message router (USER + ADMIN)
+// Router messaggi (ADMIN + USER)
 // ===============================
 bot.on(['text', 'photo', 'document'], async (ctx) => {
   const tid = ctx.from.id;
 
-  // 1) ADMIN typing a message after "Chiedi info"
+  // 1) ADMIN: dopo "Chiedi info"
   if (isAdmin(ctx)) {
     const astate = getAdminState(tid);
 
-    // annulla
     if (ctx.message?.text && ctx.message.text.trim().toLowerCase() === '/annulla') {
       clearAdminState(tid);
       return ctx.reply('✅ Operazione annullata.');
@@ -449,9 +432,7 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
           `ℹ️ Messaggio dall’admin:\n${txt}\n\nRispondi qui in chat al bot.`
         );
 
-        // salva una traccia minima nel DB (opzionale)
         await updateRequest(astate.requestId, { admin_note: `Admin asked info: ${txt}` }).catch(() => {});
-
         clearAdminState(tid);
         return ctx.reply('✅ Messaggio inviato all’utente.');
       } catch (e) {
@@ -461,7 +442,6 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
       }
     }
 
-    // se l'admin scrive a caso senza essere in ASK_INFO, ignoriamo
     return;
   }
 
@@ -534,19 +514,15 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
 });
 
 // ===============================
-// Forward USER replies to ADMIN (when admin asked info)
+// Forward USER replies to ADMIN (post-verifica)
 // ===============================
-// Se l’utente risponde dopo una richiesta info, inoltriamo agli admin.
-// (Semplice: qualunque messaggio dell’utente, se la sua ultima richiesta è SUBMITTED/APPROVED/REJECTED, lo mandiamo come “reply”.)
 bot.on('text', async (ctx, next) => {
   if (isAdmin(ctx)) return next();
 
-  // se l’utente NON è in flow (nessuno step), allora è probabilmente una risposta post-verifica
   const st = getUserState(ctx.from.id);
   if (st?.step) return next();
 
   try {
-    // prende l’ultima richiesta dell’utente (se vuoi limitarlo meglio, dimmelo e lo rendiamo “per requestId”)
     const { data, error } = await supabase
       .from('users')
       .select('id')
@@ -554,7 +530,6 @@ bot.on('text', async (ctx, next) => {
       .single();
 
     if (error) return next();
-
     const userId = data.id;
 
     const { data: lastReq, error: e2 } = await supabase
@@ -592,9 +567,7 @@ bot.on('text', async (ctx, next) => {
 // ===============================
 async function start() {
   try {
-    // Consigliato: rimuove eventuale webhook e pulisce update pendenti
     await bot.telegram.deleteWebhook({ drop_pending_updates: true });
-
     await bot.launch({ dropPendingUpdates: true });
     console.log('Bot started');
   } catch (e) {
