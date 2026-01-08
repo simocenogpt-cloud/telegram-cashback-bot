@@ -1,14 +1,6 @@
 /**
  * Telegram VIP Access Bot (Background Worker - Render)
  *
- * USER:
- *  - VIP request flow
- *  - Support flow (ticket): user sends message -> admin receives -> admin replies -> user receives
- *
- * ADMIN:
- *  - Approve/Reject/Ask info
- *  - Support replies
- *
  * ENV on Render (Worker → Environment):
  *  BOT_TOKEN
  *  SUPABASE_URL
@@ -44,7 +36,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const bot = new Telegraf(BOT_TOKEN);
 
 // ===============================
-// TESTO INTRO (IDENTICO AL TUO)
+// TESTO INTRO (TUO)
 // ===============================
 function introMessage() {
   return `🔥 Richiesta accesso VIP + Premi 🔥
@@ -97,16 +89,15 @@ const setUserState = (tid, data) => stateUser.set(tid, { ...(stateUser.get(tid) 
 const getUserState = (tid) => stateUser.get(tid) || {};
 const clearUserState = (tid) => stateUser.delete(tid);
 
-const stateAdmin = new Map(); // admin_id -> { mode: 'ASK_INFO', requestId, userTelegramId }
+const stateAdmin = new Map(); // admin_id -> { mode, requestId, userTelegramId, supportUserTelegramId }
 const setAdminState = (aid, data) => stateAdmin.set(aid, { ...(stateAdmin.get(aid) || {}), ...data });
 const getAdminState = (aid) => stateAdmin.get(aid) || {};
 const clearAdminState = (aid) => stateAdmin.delete(aid);
 
 const pendingReplies = new Map(); // userTelegramId -> { adminId, requestId }
 
-// SUPPORT routing
-const pendingSupport = new Map(); // userTelegramId -> true (user is writing support)
-const supportThreads = new Map(); // userTelegramId -> { adminId } (last admin who handled support)
+// Support: user pressed support and next msg becomes ticket
+const pendingSupport = new Map(); // userTelegramId -> true
 
 // ===============================
 // HELPERS
@@ -128,6 +119,11 @@ function errToString(e) {
   } catch {
     return 'Unknown error';
   }
+}
+
+function channelIdFromEnv() {
+  const n = Number(PUBLIC_CHANNEL_ID);
+  return Number.isFinite(n) ? n : PUBLIC_CHANNEL_ID;
 }
 
 // ===============================
@@ -238,6 +234,31 @@ async function notifyAdminsNewRequest(ctxUser, req) {
 }
 
 // ===============================
+// SUPPORT: notify admin with "💬 Rispondi"
+// ===============================
+async function notifyAdminsSupportTicket(ctxUser) {
+  const uname = ctxUser.from.username ? `@${ctxUser.from.username}` : 'n/a';
+  const userTid = ctxUser.from.id;
+
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('💬 Rispondi', `ADMIN_SUPPORT_REPLY_${userTid}`)]
+  ]);
+
+  const header =
+    `🆘 SUPPORTO\n` +
+    `User: ${uname} (${userTid})\n` +
+    `Premi “💬 Rispondi” per inviare una risposta a questo utente.`;
+
+  for (const aid of adminIds) {
+    try {
+      await bot.telegram.sendMessage(aid, header, { reply_markup: keyboard.reply_markup });
+    } catch (e) {
+      console.error('Support header failed:', e);
+    }
+  }
+}
+
+// ===============================
 // START
 // ===============================
 bot.start(async (ctx) => {
@@ -308,7 +329,7 @@ bot.action('SUBMIT', async (ctx) => {
 });
 
 // ===============================
-// ADMIN ACTIONS
+// ADMIN ACTIONS (VIP)
 // ===============================
 bot.action(/ADMIN_APPROVE_(\d+)/, async (ctx) => {
   await ctx.answerCbQuery();
@@ -326,10 +347,7 @@ bot.action(/ADMIN_APPROVE_(\d+)/, async (ctx) => {
       return ctx.reply('⚠️ PUBLIC_CHANNEL_ID non configurato (Render → Environment).');
     }
 
-    const channelIdNum = Number(PUBLIC_CHANNEL_ID);
-    const channelId = Number.isFinite(channelIdNum) ? channelIdNum : PUBLIC_CHANNEL_ID;
-
-    const invite = await bot.telegram.createChatInviteLink(channelId, {
+    const invite = await bot.telegram.createChatInviteLink(channelIdFromEnv(), {
       member_limit: 1,
       expire_date: Math.floor(Date.now() / 1000) + 60 * 60 * 24
     });
@@ -384,13 +402,35 @@ bot.action(/ADMIN_ASK_(\d+)/, async (ctx) => {
 
     setAdminState(ctx.from.id, { mode: 'ASK_INFO', requestId, userTelegramId });
 
-    await ctx.reply(
-      `💬 Ok. Scrivi ora il messaggio per l’utente (ID richiesta ${requestId}).\nPer annullare: /annulla`
-    );
+    await ctx.reply(`💬 Scrivi ora il messaggio per l’utente (ID richiesta ${requestId}).\nPer annullare: /annulla`);
   } catch (e) {
     console.error('ASK ERROR:', e);
     await ctx.reply(`❌ Errore: ${errToString(e)}`);
   }
+});
+
+// ===============================
+// ADMIN ACTIONS (SUPPORT) with button + ForceReply
+// ===============================
+bot.action(/ADMIN_SUPPORT_REPLY_(\d+)/, async (ctx) => {
+  await ctx.answerCbQuery();
+  if (!isAdmin(ctx)) return ctx.reply('Non autorizzato.');
+
+  const userTid = Number(ctx.match[1]);
+  if (!Number.isFinite(userTid)) return ctx.reply('ID utente non valido.');
+
+  setAdminState(ctx.from.id, { mode: 'SUPPORT_REPLY', supportUserTelegramId: userTid });
+
+  // ForceReply: ti apre la risposta diretta a questo messaggio
+  await ctx.reply(
+    `🆘 Supporto — Risposta per user (${userTid})\nScrivi qui la risposta (testo/foto/file).\nPer annullare: /annulla`,
+    {
+      reply_markup: {
+        force_reply: true,
+        input_field_placeholder: 'Scrivi la risposta da inviare all’utente...'
+      }
+    }
+  );
 });
 
 // ===============================
@@ -399,7 +439,7 @@ bot.action(/ADMIN_ASK_(\d+)/, async (ctx) => {
 bot.on(['text', 'photo', 'document'], async (ctx) => {
   const tid = ctx.from.id;
 
-  // ===== ADMIN: invia messaggio dopo "Chiedi info" =====
+  // ===== ADMIN routing =====
   if (isAdmin(ctx)) {
     const astate = getAdminState(tid);
 
@@ -408,22 +448,32 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
       return ctx.reply('✅ Operazione annullata.');
     }
 
-    // ADMIN replying to a SUPPORT ticket: MUST reply to the bot message that had "🆘 SUPPORTO"
-    // We'll also allow manual command: /support <userId> <message>
-    if (ctx.message?.text?.startsWith('/support ')) {
-      const parts = ctx.message.text.split(' ');
-      const userId = Number(parts[1]);
-      const msg = parts.slice(2).join(' ').trim();
-      if (!userId || !msg) return ctx.reply('Uso: /support <userId> <messaggio>');
+    // 1) Admin replying to SUPPORT
+    if (astate?.mode === 'SUPPORT_REPLY' && astate.supportUserTelegramId) {
+      const target = astate.supportUserTelegramId;
+
       try {
-        await bot.telegram.sendMessage(userId, `🆘 Supporto (admin):\n${msg}`);
-        supportThreads.set(userId, { adminId: tid });
-        return ctx.reply('✅ Risposta supporto inviata.');
+        if (ctx.message.text) {
+          const txt = ctx.message.text.trim();
+          if (!txt) return ctx.reply('Scrivi un testo (o invia foto/file), oppure /annulla.');
+          await bot.telegram.sendMessage(target, `🆘 Supporto (admin):\n${txt}`);
+        } else if (ctx.message.photo?.length) {
+          const fid = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+          await bot.telegram.sendPhoto(target, fid, { caption: '🆘 Supporto (admin)' });
+        } else if (ctx.message.document?.file_id) {
+          await bot.telegram.sendDocument(target, ctx.message.document.file_id, { caption: '🆘 Supporto (admin)' });
+        }
+
+        clearAdminState(tid);
+        return ctx.reply('✅ Risposta supporto inviata all’utente.');
       } catch (e) {
+        console.error('Support reply send error:', e);
+        clearAdminState(tid);
         return ctx.reply(`❌ Errore invio supporto: ${errToString(e)}`);
       }
     }
 
+    // 2) Admin "Chiedi info" flow
     if (astate?.mode === 'ASK_INFO' && astate.userTelegramId) {
       const txt = (ctx.message?.text || '').trim();
       if (!txt) return ctx.reply('Scrivi un messaggio testuale (non foto/file) oppure /annulla.');
@@ -449,30 +499,25 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
     return;
   }
 
-  // ===== USER: SUPPORT message (after pressing Support) =====
+  // ===== USER: support ticket message =====
   if (pendingSupport.get(tid)) {
     pendingSupport.delete(tid);
 
-    const uname = ctx.from.username ? `@${ctx.from.username}` : 'n/a';
-    const header = `🆘 SUPPORTO\nUser: ${uname} (${ctx.from.id})\nScrivi una risposta facendo reply qui, oppure usa:\n/support ${ctx.from.id} <messaggio>`;
+    await notifyAdminsSupportTicket(ctx);
 
+    // inoltra anche il contenuto del ticket a tutti gli admin
     for (const aid of adminIds) {
       try {
-        await bot.telegram.sendMessage(aid, header);
-
         if (ctx.message.text) {
-          await bot.telegram.sendMessage(aid, `Messaggio:\n${ctx.message.text.trim()}`);
+          await bot.telegram.sendMessage(aid, `Messaggio supporto:\n${ctx.message.text.trim()}`);
         } else if (ctx.message.photo?.length) {
           const fid = ctx.message.photo[ctx.message.photo.length - 1].file_id;
           await bot.telegram.sendPhoto(aid, fid, { caption: 'Allegato supporto (foto)' });
         } else if (ctx.message.document?.file_id) {
           await bot.telegram.sendDocument(aid, ctx.message.document.file_id, { caption: 'Allegato supporto (file)' });
         }
-
-        // memorizza “thread” supporto: quel user è gestito da quell’admin (ultimo)
-        supportThreads.set(ctx.from.id, { adminId: aid });
       } catch (e) {
-        console.error('Support notify failed:', e);
+        console.error('Support content forward failed:', e);
       }
     }
 
@@ -480,7 +525,7 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
     return;
   }
 
-  // ===== USER: if pending ASK_INFO reply, forward to the right admin =====
+  // ===== USER: pending reply to "Chiedi info" =====
   const st = getUserState(tid);
   if (!st?.step) {
     const pending = pendingReplies.get(tid);
@@ -514,15 +559,11 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
         console.error('Forward to admin failed:', e);
         await ctx.reply('❌ Errore: non sono riuscito a inoltrare la risposta all’admin. Riprova.');
       }
-
       return;
     }
-
-    // ===== USER: if admin answered via /support, user can just write and we forward to admin in that support thread (optional) =====
-    // (Se vuoi anche il “supporto chat continua”, possiamo abilitarlo. Per ora lo lasciamo semplice.)
   }
 
-  // ===== USER: VIP flow standard =====
+  // ===== USER: VIP flow =====
   if (!st.step || !st.requestId) return;
 
   try {
@@ -588,11 +629,6 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
     clearUserState(tid);
   }
 });
-
-// ===============================
-// ADMIN REPLY TO SUPPORT (simple method)
-// Admin just uses: /support <userId> <message>
-// ===============================
 
 // ===============================
 // START BOT
