@@ -584,8 +584,15 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
   if (!st.step || !st.requestId) return;
 
   try {
+    // helper: se serve testo ma non è testo
+    const requireText = async (msg) => {
+      await ctx.reply(msg);
+      return true; // "handled"
+    };
+
     if (st.step === 'FULL_NAME') {
-      const fullName = (ctx.message.text || '').trim();
+      if (!ctx.message.text) return requireText('❗️Inserisci *solo testo*: Nome e Cognome (niente foto/file).');
+      const fullName = ctx.message.text.trim();
       if (fullName.length < 3) return ctx.reply('Nome non valido. Reinserisci Nome e Cognome:');
       await updateRequest(st.requestId, { full_name: fullName });
       setUserState(tid, { step: 'EMAIL' });
@@ -593,15 +600,19 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
     }
 
     if (st.step === 'EMAIL') {
-      const email = (ctx.message.text || '').trim();
-      if (!email.includes('@')) return ctx.reply('Email non valida. Reinserisci:');
+      if (!ctx.message.text) return requireText('❗️Inserisci *solo testo*: la tua Email (niente foto/file).');
+      const email = ctx.message.text.trim();
+      // validazione email un po' migliore (semplice ma più robusta)
+      const emailOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+      if (!emailOk) return ctx.reply('Email non valida. Reinserisci:');
       await updateRequest(st.requestId, { email });
       setUserState(tid, { step: 'USERNAME' });
       return ctx.reply('Inserisci Username / ID usato sul bookmaker (quello del conto):');
     }
 
     if (st.step === 'USERNAME') {
-      const uname = (ctx.message.text || '').trim();
+      if (!ctx.message.text) return requireText('❗️Inserisci *solo testo*: Username/ID bookmaker (niente foto/file).');
+      const uname = ctx.message.text.trim();
       if (uname.length < 2) return ctx.reply('Valore non valido. Reinserisci Username/ID:');
       await updateRequest(st.requestId, { username: uname });
       setUserState(tid, { step: 'SCREENSHOT' });
@@ -609,6 +620,7 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
     }
 
     if (st.step === 'SCREENSHOT') {
+      // qui accettiamo SOLO foto o documento
       let fileId = null;
       let mime = null;
 
@@ -619,7 +631,7 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
         fileId = ctx.message.document.file_id;
         mime = ctx.message.document.mime_type || 'document';
       } else {
-        return ctx.reply('Per favore invia una foto o un file (screenshot).');
+        return ctx.reply('❗️In questo step devi inviare *uno screenshot* (foto o file).');
       }
 
       await updateRequest(st.requestId, { screenshot_file_id: fileId, screenshot_mime: mime });
@@ -645,6 +657,7 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
     await ctx.reply('Errore durante la compilazione. Riprova dal menu.', mainMenu);
     clearUserState(tid);
   }
+
 });
 
 // ===============================
