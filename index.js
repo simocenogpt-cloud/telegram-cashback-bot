@@ -40,6 +40,14 @@ const PRIZES_TEXT = `🎁 Premi disponibili (buoni regalo):
 • Apple
 • Spotify`;
 
+// Escape HTML (per evitare errori parse + sicurezza)
+function esc(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 function cashbackMessage() {
   const links = BOOKMAKERS.map(b => `• ${b.name}: ${b.url}`).join('\n');
 
@@ -146,19 +154,23 @@ async function setStatus(id, status, admin_note = null) {
   await updateRequest(id, patch);
 }
 
+async function getUserTelegramIdByUserId(userId) {
+  const { data: userRow, error } = await supabase
+    .from('users')
+    .select('telegram_id')
+    .eq('id', userId)
+    .single();
+  if (error) throw error;
+  return userRow.telegram_id;
+}
+
 // ===============================
-// START (deep link)
+// START
 // ===============================
 bot.start(async (ctx) => {
   try {
     await upsertUser(ctx);
-
-    const payload = (ctx.startPayload || '').trim(); // es: cashback_snai
-    if (payload === 'cashback_snai') {
-      await ctx.reply(cashbackMessage(), mainMenu);
-    } else {
-      await ctx.reply(cashbackMessage(), mainMenu);
-    }
+    await ctx.reply(cashbackMessage(), mainMenu);
   } catch (err) {
     console.error(err);
     await ctx.reply('Errore temporaneo. Riprova tra poco.');
@@ -211,16 +223,18 @@ bot.action('SUBMIT', async (ctx) => {
     await setStatus(st.requestId, 'SUBMITTED');
     const req = await getRequest(st.requestId);
 
-    // Notifica admin con tasti Approva/Rifiuta
-    const adminText =
-      `🧾 *Nuova richiesta VIP*\n` +
-      `ID: ${req.id}\n` +
-      `User TG: @${ctx.from.username || 'n/a'} (${ctx.from.id})\n` +
-      `Nome: ${req.full_name || '-'}\n` +
-      `Email: ${req.email || '-'}\n` +
-      `Username bookmaker: ${req.username || '-'}\n` +
-      `Screenshot: ${req.screenshot_file_id ? '✅ presente' : '❌ mancante'}\n\n` +
-      `${PRIZES_TEXT}`;
+    // Notifica admin con tasti Approva/Rifiuta (HTML + escape)
+    const tgUser = ctx.from.username ? `@${ctx.from.username}` : 'n/a';
+
+    const adminTextHtml =
+      `🧾 <b>Nuova richiesta VIP</b>\n` +
+      `ID: <b>${esc(req.id)}</b>\n` +
+      `User TG: <b>${esc(tgUser)}</b> (${esc(ctx.from.id)})\n` +
+      `Nome: <b>${esc(req.full_name || '-')}</b>\n` +
+      `Email: <b>${esc(req.email || '-')}</b>\n` +
+      `Username bookmaker: <b>${esc(req.username || '-')}</b>\n` +
+      `Screenshot: <b>${req.screenshot_file_id ? '✅ presente' : '❌ mancante'}</b>\n\n` +
+      `${esc(PRIZES_TEXT)}`;
 
     const adminKeyboard = Markup.inlineKeyboard([
       [
@@ -231,7 +245,10 @@ bot.action('SUBMIT', async (ctx) => {
 
     for (const aid of adminIds) {
       try {
-        await bot.telegram.sendMessage(aid, adminText, { parse_mode: 'Markdown', ...adminKeyboard });
+        await bot.telegram.sendMessage(aid, adminTextHtml, {
+          parse_mode: 'HTML',
+          ...adminKeyboard
+        });
       } catch (e) {
         console.error('Admin notify failed:', e);
       }
@@ -260,24 +277,14 @@ bot.action(/ADMIN_APPROVE_(\d+)/, async (ctx) => {
     const requestId = Number(ctx.match[1]);
     const req = await getRequest(requestId);
 
-    // aggiorna stato
     await setStatus(requestId, 'APPROVED');
 
-    // manda link VIP all'utente
     if (!PUBLIC_CHANNEL_URL) {
       await ctx.reply('⚠️ PUBLIC_CHANNEL_URL non configurato su Render (Environment).');
       return;
     }
 
-    // Recupera telegram_id dell'utente dalla tabella users
-    const { data: userRow, error } = await supabase
-      .from('users')
-      .select('telegram_id')
-      .eq('id', req.user_id)
-      .single();
-    if (error) throw error;
-
-    const userTelegramId = userRow.telegram_id;
+    const userTelegramId = await getUserTelegramIdByUserId(req.user_id);
 
     await bot.telegram.sendMessage(
       userTelegramId,
@@ -302,15 +309,12 @@ bot.action(/ADMIN_REJECT_(\d+)/, async (ctx) => {
 
     await setStatus(requestId, 'REJECTED', 'Rifiutata da admin');
 
-    // Recupera telegram_id utente
-    const { data: userRow, error } = await supabase
-      .from('users')
-      .select('telegram_id')
-      .eq('id', req.user_id)
-      .single();
-    if (error) throw error;
+    const userTelegramId = await getUserTelegramIdByUserId(req.user_id);
 
-    await bot.telegram.sendMessage(userRow.telegram_id, '❌ Richiesta rifiutata. Se pensi sia un errore, rispondi qui per supporto.');
+    await bot.telegram.sendMessage(
+      userTelegramId,
+      '❌ Richiesta rifiutata. Se pensi sia un errore, rispondi qui per supporto.'
+    );
 
     await ctx.editMessageReplyMarkup({ inline_keyboard: [] }).catch(() => {});
     await ctx.reply(`❌ Rifiutato (ID ${requestId}). Notifica inviata all’utente.`);
@@ -397,9 +401,7 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
 // ===============================
 async function start() {
   try {
-    // pulisce eventuali webhook e update pendenti
     await bot.telegram.deleteWebhook({ drop_pending_updates: true });
-
     await bot.launch({ dropPendingUpdates: true });
     console.log('Bot started');
   } catch (e) {
