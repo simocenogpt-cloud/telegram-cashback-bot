@@ -1,5 +1,4 @@
 import 'dotenv/config';
-import http from 'http';
 import { Telegraf, Markup } from 'telegraf';
 import { createClient } from '@supabase/supabase-js';
 
@@ -78,6 +77,7 @@ const clearState = (tid) => state.delete(tid);
 // --- Helpers DB ---
 async function upsertUser(ctx) {
   const u = ctx.from;
+
   const payload = {
     telegram_id: u.id,
     username: u.username || null,
@@ -100,12 +100,7 @@ async function upsertUser(ctx) {
     return existing.id;
   }
 
-  const { data: inserted, error: e3 } = await supabase
-    .from('users')
-    .insert(payload)
-    .select('id')
-    .single();
-
+  const { data: inserted, error: e3 } = await supabase.from('users').insert(payload).select('id').single();
   if (e3) throw e3;
   return inserted.id;
 }
@@ -140,15 +135,16 @@ bot.start(async (ctx) => {
 
     if (payload === 'cashback_snai') {
       await ctx.reply(cashbackMessage(), mainMenu);
-    } else {
-      await ctx.reply(
-        `Ciao! 👋\nApri il link dal canale per partecipare al cashback.\n${
-          PUBLIC_CHANNEL_URL ? `Canale: ${PUBLIC_CHANNEL_URL}` : ''
-        }`
-      );
+      return;
     }
+
+    await ctx.reply(
+      `Ciao! 👋\nApri il link dal canale per partecipare al cashback.\n${
+        PUBLIC_CHANNEL_URL ? `Canale: ${PUBLIC_CHANNEL_URL}` : ''
+      }`
+    );
   } catch (err) {
-    console.error(err);
+    console.error('START error:', err);
     await ctx.reply('Errore temporaneo. Riprova tra poco.');
   }
 });
@@ -163,7 +159,7 @@ bot.action('START_FLOW', async (ctx) => {
     setState(ctx.from.id, { step: 'FULL_NAME', requestId });
     await ctx.reply('Perfetto ✅\n\nInserisci *Nome e Cognome*:', { parse_mode: 'Markdown' });
   } catch (err) {
-    console.error(err);
+    console.error('START_FLOW error:', err);
     await ctx.reply('Errore. Riprova tra poco.');
   }
 });
@@ -185,7 +181,7 @@ bot.action(/PAYOUT_(.+)/, async (ctx) => {
 
     await ctx.reply(`Ok. Ora inserisci l’indirizzo ${method.toUpperCase()} (email o ID):`);
   } catch (err) {
-    console.error(err);
+    console.error('PAYOUT error:', err);
     await ctx.reply('Errore. Riprova.');
   }
 });
@@ -227,13 +223,15 @@ bot.action('SUBMIT', async (ctx) => {
     for (const aid of adminIds) {
       try {
         await bot.telegram.sendMessage(aid, adminText, { parse_mode: 'Markdown' });
-      } catch {}
+      } catch (e) {
+        console.error('Admin notify error:', aid, e?.message || e);
+      }
     }
 
     clearState(ctx.from.id);
     await ctx.reply('✅ Richiesta inviata! Ti aggiorniamo dopo la verifica (entro 72 ore).');
   } catch (err) {
-    console.error(err);
+    console.error('SUBMIT error:', err);
     await ctx.reply('Errore durante invio. Riprova.');
   }
 });
@@ -321,33 +319,32 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
       return ctx.reply('Usa i pulsanti sotto per inviare/modificare.', confirmMenu);
     }
   } catch (err) {
-    console.error(err);
+    console.error('FLOW error:', err);
     await ctx.reply('Errore durante la compilazione. Riprova dal menu.', mainMenu);
     clearState(tid);
   }
 });
 
-/**
- * Mini server HTTP per Render (Web Service gratuito).
- * Render richiede una porta aperta per considerare il servizio "healthy".
- */
-const PORT = process.env.PORT || 3000;
+// --- Avvio robusto su Render Worker ---
+async function start() {
+  try {
+    // Se per sbaglio avevi impostato un webhook in passato, lo togliamo.
+    // drop_pending_updates pulisce la coda.
+    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
 
-http
-  .createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Bot is running');
-  })
-  .listen(PORT, () => {
-    console.log(`HTTP server listening on port ${PORT}`);
-  });
+    await bot.launch({ dropPendingUpdates: true });
+    console.log('Bot started (polling).');
+  } catch (err) {
+    console.error('FATAL start error:', err);
+    // Se c’è ancora una seconda istanza attiva, vedrai 409 qui.
+    process.exit(1);
+  }
+}
 
-(async () => {
-  await bot.launch({ dropPendingUpdates: true });
-  console.log('Bot started');
-})();
+start();
 
-bot.catch((err) => console.error('BOT ERROR:', err));
-
+// --- Shutdown pulito ---
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+process.on('unhandledRejection', (err) => console.error('unhandledRejection:', err));
+process.on('uncaughtException', (err) => console.error('uncaughtException:', err));
