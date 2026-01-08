@@ -116,6 +116,7 @@ async function createDraftRequest(userId, campaign) {
     .insert({ user_id: userId, campaign })
     .select('id')
     .single();
+
   if (error) throw error;
   return data.id;
 }
@@ -341,8 +342,12 @@ http
     console.log(`HTTP server listening on port ${PORT}`);
   });
 
-bot.launch();
-console.log('Bot started');
+(async () => {
+  await bot.launch({ dropPendingUpdates: true });
+  console.log('Bot started');
+})();
+
+bot.catch((err) => console.error('BOT ERROR:', err));
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
