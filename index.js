@@ -1,18 +1,27 @@
 /**
  * Telegram VIP Access Bot (Background Worker - Render)
- * - User flow (private chat): Name → Email → Bookmaker Username/ID → Screenshot → Confirm → Submit
- * - Admin flow (DM): receives request + buttons ✅ Approva / ❌ Rifiuta / 💬 Chiedi info
- * - On APPROVE: user receives VIP invite link + status updated
- * - On REJECT: user notified + status updated
- * - On ASK INFO: admin writes a message, bot forwards it to the user;
- *   then user reply (text/photo/document) is forwarded back to THAT admin.
  *
- * ENV required on Render (Worker → Environment):
- * BOT_TOKEN
- * SUPABASE_URL
- * SUPABASE_SERVICE_ROLE_KEY
- * ADMIN_TELEGRAM_IDS      (comma separated, e.g. "123,456")
- * PUBLIC_CHANNEL_URL      (private invite link ok)
+ * USER FLOW (private chat):
+ *  - Start -> Intro -> ✅ Invia richiesta
+ *  - Nome e Cognome -> Email -> Username bookmaker -> Screenshot -> Confirm -> Submit
+ *
+ * ADMIN FLOW (DM):
+ *  - Riceve richiesta + bottoni: ✅ Approva / ❌ Rifiuta / 💬 Chiedi info
+ *  - Vede anche lo screenshot inviato dall’utente (foto o file)
+ *  - Se "Chiedi info": admin scrive un messaggio, bot lo manda all'utente
+ *    e la prima risposta dell'utente viene inoltrata all’admin.
+ *
+ * APPROVE:
+ *  - Se VIP_CHANNEL_ID presente: crea link invito personale (member_limit:1, scadenza 24h)
+ *  - Altrimenti: usa PUBLIC_CHANNEL_URL (link statico)
+ *
+ * ENV (Render -> Worker -> Environment):
+ *  BOT_TOKEN
+ *  SUPABASE_URL
+ *  SUPABASE_SERVICE_ROLE_KEY
+ *  ADMIN_TELEGRAM_IDS     es: "123,456"
+ *  PUBLIC_CHANNEL_URL     es: https://t.me/+S_ddlbzLIXpjNzZk  (fallback)
+ *  VIP_CHANNEL_ID         es: -1001234567890 (per link monouso)
  */
 
 import 'dotenv/config';
@@ -24,7 +33,8 @@ const {
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY,
   ADMIN_TELEGRAM_IDS = '',
-  PUBLIC_CHANNEL_URL = ''
+  PUBLIC_CHANNEL_URL = '',
+  VIP_CHANNEL_ID = ''
 } = process.env;
 
 if (!BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
@@ -70,7 +80,7 @@ function introMessage() {
     `3️⃣ Invia qui i dati richiesti + screenshot del deposito\n\n` +
     `${PRIZES_TEXT}\n\n` +
     `⏱️ Verifica entro 72 ore.\n` +
-    `✅ Se approvato, riceverai il link per entrare nel canale VIP.\n\n` +
+    `✅ Se approvato, riceverai l’accesso al canale VIP.\n\n` +
     `Regole:\n` +
     `– Valido solo se usi uno dei link sopra\n` +
     `– Una sola partecipazione per persona\n` +
@@ -101,20 +111,24 @@ const setUserState = (tid, data) => stateUser.set(tid, { ...(stateUser.get(tid) 
 const getUserState = (tid) => stateUser.get(tid) || {};
 const clearUserState = (tid) => stateUser.delete(tid);
 
-// stateAdmin: admin_id -> { mode: 'ASK_INFO', requestId, userTelegramId }
+// stateAdmin: admin_id -> { mode:'ASK_INFO', requestId, userTelegramId }
 const stateAdmin = new Map();
 const setAdminState = (aid, data) => stateAdmin.set(aid, { ...(stateAdmin.get(aid) || {}), ...data });
 const getAdminState = (aid) => stateAdmin.get(aid) || {};
 const clearAdminState = (aid) => stateAdmin.delete(aid);
 
 // pendingReplies: userTelegramId -> { adminId, requestId }
-const pendingReplies = new Map(); // quando admin chiede info, attendiamo risposta di quell'utente
+const pendingReplies = new Map();
 
 // ===============================
 // Helpers
 // ===============================
+function isAdminId(id) {
+  return adminIds.includes(Number(id));
+}
+
 function isAdmin(ctx) {
-  return adminIds.includes(Number(ctx.from?.id));
+  return isAdminId(ctx.from?.id);
 }
 
 function safeText(s) {
@@ -124,7 +138,6 @@ function safeText(s) {
 function errToString(e) {
   try {
     if (!e) return 'Unknown error';
-    if (typeof e === 'string') return e;
     const desc = e?.response?.description;
     const code = e?.response?.error_code;
     if (desc || code) return `${code || ''} ${desc || ''}`.trim();
@@ -163,12 +176,7 @@ async function upsertUser(ctx) {
     return existing.id;
   }
 
-  const { data: inserted, error: e3 } = await supabase
-    .from('users')
-    .insert(payload)
-    .select('id')
-    .single();
-
+  const { data: inserted, error: e3 } = await supabase.from('users').insert(payload).select('id').single();
   if (e3) throw e3;
   return inserted.id;
 }
@@ -197,18 +205,16 @@ async function getRequest(id) {
 async function getUserTelegramIdByUserId(userId) {
   const { data, error } = await supabase.from('users').select('telegram_id').eq('id', userId).single();
   if (error) throw error;
-  // Telegram accetta sia number che string, ma meglio number se possibile
   const n = Number(data.telegram_id);
   return Number.isFinite(n) ? n : data.telegram_id;
 }
 
+// ⚠️ NON usiamo approved_at/rejected_at (ti davano errore perché non esistono nel DB)
 async function setStatus(requestId, status, admin_note = null) {
   const patch = { status };
   if (admin_note !== null) patch.admin_note = admin_note;
 
   if (status === 'SUBMITTED') patch.submitted_at = new Date().toISOString();
-  if (status === 'APPROVED') patch.approved_at = new Date().toISOString();
-  if (status === 'REJECTED') patch.rejected_at = new Date().toISOString();
 
   await updateRequest(requestId, patch);
 }
@@ -239,12 +245,12 @@ async function notifyAdminsNewRequest(ctxUser, req) {
 
   for (const aid of adminIds) {
     try {
-      // 1) Messaggio testuale + bottoni
+      // 1) Messaggio testo + bottoni
       await bot.telegram.sendMessage(aid, adminText, {
         reply_markup: adminKeyboard.reply_markup
       });
 
-      // 2) Screenshot come media (prova photo, se fallisce document)
+      // 2) Screenshot come media (prova foto, se fallisce documento)
       if (req.screenshot_file_id) {
         const caption = `📎 Screenshot deposito — ID richiesta ${req.id}`;
         try {
@@ -349,30 +355,33 @@ bot.action(/ADMIN_APPROVE_(\d+)/, async (ctx) => {
 
     const userTelegramId = await getUserTelegramIdByUserId(req.user_id);
 
-    if (!PUBLIC_CHANNEL_URL) {
-      return ctx.reply('⚠️ PUBLIC_CHANNEL_URL non configurato (Render → Environment).');
+    // 1) Proviamo a creare un link personale se VIP_CHANNEL_ID è presente
+    let inviteLink = PUBLIC_CHANNEL_URL;
+
+    if (VIP_CHANNEL_ID) {
+      const chatId = Number(VIP_CHANNEL_ID);
+      if (!Number.isFinite(chatId)) {
+        throw new Error('VIP_CHANNEL_ID non valido: deve essere un numero tipo -100123...');
+      }
+
+      const invite = await bot.telegram.createChatInviteLink(chatId, {
+        member_limit: 1,
+        expire_date: Math.floor(Date.now() / 1000) + 60 * 60 * 24 // 24 ore
+      });
+      inviteLink = invite.invite_link;
     }
 
-// Crea un link di invito personale (1 solo accesso)
-const invite = await bot.telegram.createChatInviteLink(
-  PUBLIC_CHANNEL_URL,
-  {
-    member_limit: 1,
-    expire_date: Math.floor(Date.now() / 1000) + 60 * 60 * 24 // 24 ore (opzionale)
-  }
-);
+    if (!inviteLink) {
+      return ctx.reply('⚠️ Manca PUBLIC_CHANNEL_URL e/o VIP_CHANNEL_ID. Imposta su Render → Environment.');
+    }
 
-await bot.telegram.sendMessage(
-  userTelegramId,
-  `✅ Richiesta approvata!\n\n` +
-  `🔐 Questo è il TUO link personale per entrare nel canale VIP.\n` +
-  `⚠️ È valido per una sola persona e non può essere condiviso:\n\n` +
-  `${invite.invite_link}\n\n` +
-  `⏳ Il link scade tra 24 ore.`
-);
+    await bot.telegram.sendMessage(
+      userTelegramId,
+      `✅ Richiesta approvata!\n\n` +
+        `🔐 Questo è il tuo link per entrare nel canale VIP:\n${inviteLink}\n\n` +
+        (VIP_CHANNEL_ID ? `⏳ Link valido 24 ore e per 1 solo accesso.\n` : `⚠️ Link non monouso (fallback).\n`)
+    );
 
-
-    // rimuove bottoni
     await ctx.editMessageReplyMarkup({ inline_keyboard: [] }).catch(() => {});
     await ctx.reply(`✅ Approvato (ID ${requestId}). Link inviato all’utente.`);
   } catch (e) {
@@ -421,7 +430,7 @@ bot.action(/ADMIN_ASK_(\d+)/, async (ctx) => {
 
     await ctx.reply(
       `💬 Ok. Scrivi ora il messaggio per l’utente (ID richiesta ${requestId}).\n` +
-        `Poi l’utente risponderà e vedrai qui la risposta.\n\n` +
+        `Poi la PRIMA risposta dell’utente verrà inoltrata qui.\n\n` +
         `Per annullare: /annulla`
     );
   } catch (e) {
@@ -455,7 +464,7 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
           `ℹ️ Messaggio dall’admin:\n${txt}\n\nRispondi qui in chat al bot.`
         );
 
-        // da ora aspettiamo la risposta dell'utente e la inoltriamo a QUESTO admin
+        // attendiamo la risposta dell'utente e la inoltriamo a QUESTO admin
         pendingReplies.set(astate.userTelegramId, { adminId: tid, requestId: astate.requestId });
 
         await updateRequest(astate.requestId, { admin_note: `Admin asked info: ${txt}` }).catch(() => {});
@@ -481,7 +490,6 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
       const requestId = pending.requestId;
 
       try {
-        // inoltra in base al tipo
         if (ctx.message.text) {
           const txt = ctx.message.text.trim();
           if (txt) {
@@ -501,10 +509,9 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
           });
         }
 
-        // opzionale: avvisa l'utente
         await ctx.reply('✅ Messaggio ricevuto. Lo abbiamo inoltrato all’admin.');
 
-        // chiudiamo l'attesa (una risposta = chiuso)
+        // una risposta = chiuso
         pendingReplies.delete(tid);
       } catch (e) {
         console.error('Forward to admin failed:', e);
