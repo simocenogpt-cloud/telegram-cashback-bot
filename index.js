@@ -1,12 +1,13 @@
 /**
  * Telegram VIP Access Bot (Background Worker - Render)
  *
- * ENV on Render (Worker → Environment):
+ * ENV (Render -> Worker -> Environment):
  *  BOT_TOKEN
  *  SUPABASE_URL
  *  SUPABASE_SERVICE_ROLE_KEY
- *  ADMIN_TELEGRAM_IDS        (comma separated)
- *  PUBLIC_CHANNEL_ID         (numeric chat_id like -100...)
+ *  ADMIN_TELEGRAM_IDS     es: "123,456"
+ *  PUBLIC_CHANNEL_URL     es: https://t.me/+xxxx  (fallback static link)
+ *  VIP_CHANNEL_ID         es: -1001234567890      (to generate one-time invite links)
  */
 
 import 'dotenv/config';
@@ -18,7 +19,8 @@ const {
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY,
   ADMIN_TELEGRAM_IDS = '',
-  PUBLIC_CHANNEL_ID = ''
+  PUBLIC_CHANNEL_URL = '',
+  VIP_CHANNEL_ID = ''
 } = process.env;
 
 if (!BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
@@ -89,12 +91,14 @@ const setUserState = (tid, data) => stateUser.set(tid, { ...(stateUser.get(tid) 
 const getUserState = (tid) => stateUser.get(tid) || {};
 const clearUserState = (tid) => stateUser.delete(tid);
 
-const stateAdmin = new Map(); // admin_id -> { mode, requestId, userTelegramId, supportUserTelegramId }
+// Admin “ask info”
+const stateAdmin = new Map(); // admin_id -> { mode:'ASK_INFO'|'SUPPORT_REPLY', requestId?, userTelegramId?, supportUserTelegramId? }
 const setAdminState = (aid, data) => stateAdmin.set(aid, { ...(stateAdmin.get(aid) || {}), ...data });
 const getAdminState = (aid) => stateAdmin.get(aid) || {};
 const clearAdminState = (aid) => stateAdmin.delete(aid);
 
-const pendingReplies = new Map(); // userTelegramId -> { adminId, requestId }
+// pendingReplies: userTelegramId -> { adminId, requestId }
+const pendingReplies = new Map();
 
 // Support: user pressed support and next msg becomes ticket
 const pendingSupport = new Map(); // userTelegramId -> true
@@ -121,9 +125,11 @@ function errToString(e) {
   }
 }
 
-function channelIdFromEnv() {
-  const n = Number(PUBLIC_CHANNEL_ID);
-  return Number.isFinite(n) ? n : PUBLIC_CHANNEL_ID;
+function getVipChannelId() {
+  if (!VIP_CHANNEL_ID) return null;
+  const n = Number(VIP_CHANNEL_ID);
+  if (!Number.isFinite(n)) return null;
+  return n;
 }
 
 // ===============================
@@ -343,22 +349,31 @@ bot.action(/ADMIN_APPROVE_(\d+)/, async (ctx) => {
 
     const userTelegramId = await getUserTelegramIdByUserId(req.user_id);
 
-    if (!PUBLIC_CHANNEL_ID) {
-      return ctx.reply('⚠️ PUBLIC_CHANNEL_ID non configurato (Render → Environment).');
+    let inviteLink = PUBLIC_CHANNEL_URL;
+
+    // If VIP_CHANNEL_ID present -> one-time link
+    const vipChatId = getVipChannelId();
+    if (vipChatId) {
+      const invite = await bot.telegram.createChatInviteLink(vipChatId, {
+        member_limit: 1,
+        expire_date: Math.floor(Date.now() / 1000) + 60 * 60 * 24
+      });
+      inviteLink = invite.invite_link;
     }
 
-    const invite = await bot.telegram.createChatInviteLink(channelIdFromEnv(), {
-      member_limit: 1,
-      expire_date: Math.floor(Date.now() / 1000) + 60 * 60 * 24
-    });
+    if (!inviteLink) {
+      return ctx.reply('⚠️ Manca PUBLIC_CHANNEL_URL e/o VIP_CHANNEL_ID (Render → Environment).');
+    }
 
     await bot.telegram.sendMessage(
       userTelegramId,
-      `✅ Richiesta approvata!\n\n🔐 Link personale (1 accesso):\n${invite.invite_link}\n\n⏳ Scade tra 24 ore.`
+      `✅ Richiesta approvata!\n\n` +
+        `🔐 Link per entrare nel canale VIP:\n${inviteLink}\n\n` +
+        (vipChatId ? `⏳ Valido 24 ore e per 1 solo accesso.` : `⚠️ Link statico (non monouso).`)
     );
 
     await ctx.editMessageReplyMarkup({ inline_keyboard: [] }).catch(() => {});
-    await ctx.reply(`✅ Approvato (ID ${requestId}). Link personale inviato all’utente.`);
+    await ctx.reply(`✅ Approvato (ID ${requestId}). Link inviato all’utente.`);
   } catch (e) {
     console.error('APPROVE ERROR:', e);
     await ctx.reply(`❌ Errore approvazione (ID ${requestId}): ${errToString(e)}`);
@@ -402,7 +417,11 @@ bot.action(/ADMIN_ASK_(\d+)/, async (ctx) => {
 
     setAdminState(ctx.from.id, { mode: 'ASK_INFO', requestId, userTelegramId });
 
-    await ctx.reply(`💬 Scrivi ora il messaggio per l’utente (ID richiesta ${requestId}).\nPer annullare: /annulla`);
+    await ctx.reply(
+      `💬 Scrivi ora il messaggio per l’utente (ID richiesta ${requestId}).\n` +
+        `Poi la PRIMA risposta dell’utente verrà inoltrata qui.\n\n` +
+        `Per annullare: /annulla`
+    );
   } catch (e) {
     console.error('ASK ERROR:', e);
     await ctx.reply(`❌ Errore: ${errToString(e)}`);
@@ -410,7 +429,7 @@ bot.action(/ADMIN_ASK_(\d+)/, async (ctx) => {
 });
 
 // ===============================
-// ADMIN ACTIONS (SUPPORT) with button + ForceReply
+// ADMIN ACTIONS (SUPPORT)
 // ===============================
 bot.action(/ADMIN_SUPPORT_REPLY_(\d+)/, async (ctx) => {
   await ctx.answerCbQuery();
@@ -421,7 +440,6 @@ bot.action(/ADMIN_SUPPORT_REPLY_(\d+)/, async (ctx) => {
 
   setAdminState(ctx.from.id, { mode: 'SUPPORT_REPLY', supportUserTelegramId: userTid });
 
-  // ForceReply: ti apre la risposta diretta a questo messaggio
   await ctx.reply(
     `🆘 Supporto — Risposta per user (${userTid})\nScrivi qui la risposta (testo/foto/file).\nPer annullare: /annulla`,
     {
@@ -434,7 +452,7 @@ bot.action(/ADMIN_SUPPORT_REPLY_(\d+)/, async (ctx) => {
 });
 
 // ===============================
-// ROUTER (ADMIN + USER + SUPPORT)
+// ROUTER (ADMIN + USER)
 // ===============================
 bot.on(['text', 'photo', 'document'], async (ctx) => {
   const tid = ctx.from.id;
@@ -448,10 +466,9 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
       return ctx.reply('✅ Operazione annullata.');
     }
 
-    // 1) Admin replying to SUPPORT
+    // Admin reply to SUPPORT
     if (astate?.mode === 'SUPPORT_REPLY' && astate.supportUserTelegramId) {
       const target = astate.supportUserTelegramId;
-
       try {
         if (ctx.message.text) {
           const txt = ctx.message.text.trim();
@@ -473,7 +490,7 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
       }
     }
 
-    // 2) Admin "Chiedi info" flow
+    // Admin "Chiedi info"
     if (astate?.mode === 'ASK_INFO' && astate.userTelegramId) {
       const txt = (ctx.message?.text || '').trim();
       if (!txt) return ctx.reply('Scrivi un messaggio testuale (non foto/file) oppure /annulla.');
@@ -486,8 +503,8 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
 
         pendingReplies.set(astate.userTelegramId, { adminId: tid, requestId: astate.requestId });
         await updateRequest(astate.requestId, { admin_note: `Admin asked info: ${txt}` }).catch(() => {});
-
         clearAdminState(tid);
+
         return ctx.reply('✅ Messaggio inviato. Ora attendo la risposta dell’utente.');
       } catch (e) {
         console.error(e);
@@ -505,7 +522,7 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
 
     await notifyAdminsSupportTicket(ctx);
 
-    // inoltra anche il contenuto del ticket a tutti gli admin
+    // forward content to admins
     for (const aid of adminIds) {
       try {
         if (ctx.message.text) {
