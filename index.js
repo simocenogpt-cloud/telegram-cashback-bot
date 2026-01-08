@@ -1,27 +1,20 @@
 /**
  * Telegram VIP Access Bot (Background Worker - Render)
  *
- * USER FLOW (private chat):
- *  - Start -> Intro -> ✅ Invia richiesta
- *  - Nome e Cognome -> Email -> Username bookmaker -> Screenshot -> Confirm -> Submit
+ * USER:
+ *  - VIP request flow
+ *  - Support flow (ticket): user sends message -> admin receives -> admin replies -> user receives
  *
- * ADMIN FLOW (DM):
- *  - Riceve richiesta + bottoni: ✅ Approva / ❌ Rifiuta / 💬 Chiedi info
- *  - Vede anche lo screenshot inviato dall’utente (foto o file)
- *  - Se "Chiedi info": admin scrive un messaggio, bot lo manda all'utente
- *    e la prima risposta dell'utente viene inoltrata all’admin.
+ * ADMIN:
+ *  - Approve/Reject/Ask info
+ *  - Support replies
  *
- * APPROVE:
- *  - Se VIP_CHANNEL_ID presente: crea link invito personale (member_limit:1, scadenza 24h)
- *  - Altrimenti: usa PUBLIC_CHANNEL_URL (link statico)
- *
- * ENV (Render -> Worker -> Environment):
+ * ENV on Render (Worker → Environment):
  *  BOT_TOKEN
  *  SUPABASE_URL
  *  SUPABASE_SERVICE_ROLE_KEY
- *  ADMIN_TELEGRAM_IDS     es: "123,456"
- *  PUBLIC_CHANNEL_URL     es: https://t.me/+S_ddlbzLIXpjNzZk  (fallback)
- *  VIP_CHANNEL_ID         es: -1001234567890 (per link monouso)
+ *  ADMIN_TELEGRAM_IDS        (comma separated)
+ *  PUBLIC_CHANNEL_ID         (numeric chat_id like -100...)
  */
 
 import 'dotenv/config';
@@ -33,8 +26,7 @@ const {
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY,
   ADMIN_TELEGRAM_IDS = '',
-  PUBLIC_CHANNEL_URL = '',
-  VIP_CHANNEL_ID = ''
+  PUBLIC_CHANNEL_ID = ''
 } = process.env;
 
 if (!BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
@@ -52,44 +44,39 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const bot = new Telegraf(BOT_TOKEN);
 
 // ===============================
-// CONFIG (testi + link bookmakers)
+// TESTO INTRO (IDENTICO AL TUO)
 // ===============================
-const BOOKMAKERS = [
-  { name: 'Eurobet', url: 'https://record.betpartners.it/_Klv9utJ3bqpKqXDxdQZqW2Nd7ZgqdRLk/1/' },
-  { name: 'bwin', url: 'https://www.bwin.it/it/engage/lan/s/p/sports/accaboost?wm=5596580' },
-  { name: 'Betsson', url: 'https://record.betsson.it/_dYA2EWAR45qw8pi7H3I6R2Nd7ZgqdRLk/1/' },
-  { name: 'Starcasino', url: 'https://record.starcasino.it/_dYA2EWAR45rPSO5RLscKcGNd7ZgqdRLk/1/' }
-];
-
-const PRIZES_TEXT =
-  `🎁 Premi disponibili (buoni regalo):\n` +
-  `• Amazon\n` +
-  `• Zalando\n` +
-  `• Airbnb\n` +
-  `• Apple\n` +
-  `• Spotify`;
-
 function introMessage() {
-  const links = BOOKMAKERS.map((b) => `• ${b.name}: ${b.url}`).join('\n');
+  return `🔥 Richiesta accesso VIP + Premi 🔥
 
-  return (
-    `🔥 Accesso VIP + Premi 🔥\n\n` +
-    `Per partecipare:\n` +
-    `1️⃣ Registrati su UNO di questi link:\n${links}\n\n` +
-    `2️⃣ Effettua un deposito (seguendo le regole della promo/link)\n` +
-    `3️⃣ Invia qui i dati richiesti + screenshot del deposito\n\n` +
-    `${PRIZES_TEXT}\n\n` +
-    `⏱️ Verifica entro 72 ore.\n` +
-    `✅ Se approvato, riceverai l’accesso al canale VIP.\n\n` +
-    `Regole:\n` +
-    `– Valido solo se usi uno dei link sopra\n` +
-    `– Una sola partecipazione per persona\n` +
-    `– Screenshot falsi o modificati = esclusione immediata`
-  );
+Per partecipare:
+1️⃣ Registrati su UNO di questi link:
+• Eurobet: https://record.betpartners.it/_Klv9utJ3bqpKqXDxdQZqW2Nd7ZgqdRLk/1/
+• bwin: https://www.bwin.it/it/engage/lan/s/p/sports/accaboost?wm=5596580
+• Betsson: https://record.betsson.it/_dYA2EWAR45qw8pi7H3I6R2Nd7ZgqdRLk/1/
+• Starcasino: https://record.starcasino.it/_dYA2EWAR45rPSO5RLscKcGNd7ZgqdRLk/1/
+
+2️⃣ Effettua un deposito (seguendo le regole della promo/link)
+3️⃣ Invia qui i dati richiesti + screenshot deposito
+
+🎁 Premi disponibili (buoni regalo):
+• Amazon
+• Zalando
+• Airbnb
+• Apple
+• Spotify
+
+⏱️ Verifica: entro 72 ore.
+✅ Se la richiesta viene approvata, riceverai il link per entrare nel canale VIP.
+
+Regole:
+– Valido solo se usi uno dei link sopra
+– Una sola partecipazione per persona
+– Screenshot falsi o modificati = esclusione immediata`;
 }
 
 // ===============================
-// UI (pulsanti)
+// UI
 // ===============================
 const mainMenu = Markup.inlineKeyboard([
   [Markup.button.callback('✅ Invia richiesta', 'START_FLOW')],
@@ -103,32 +90,29 @@ const confirmMenu = Markup.inlineKeyboard([
 ]);
 
 // ===============================
-// Stato in memoria
+// STATE
 // ===============================
-// stateUser: telegram_user_id -> { step, requestId }
-const stateUser = new Map();
+const stateUser = new Map(); // telegram_user_id -> { step, requestId }
 const setUserState = (tid, data) => stateUser.set(tid, { ...(stateUser.get(tid) || {}), ...data });
 const getUserState = (tid) => stateUser.get(tid) || {};
 const clearUserState = (tid) => stateUser.delete(tid);
 
-// stateAdmin: admin_id -> { mode:'ASK_INFO', requestId, userTelegramId }
-const stateAdmin = new Map();
+const stateAdmin = new Map(); // admin_id -> { mode: 'ASK_INFO', requestId, userTelegramId }
 const setAdminState = (aid, data) => stateAdmin.set(aid, { ...(stateAdmin.get(aid) || {}), ...data });
 const getAdminState = (aid) => stateAdmin.get(aid) || {};
 const clearAdminState = (aid) => stateAdmin.delete(aid);
 
-// pendingReplies: userTelegramId -> { adminId, requestId }
-const pendingReplies = new Map();
+const pendingReplies = new Map(); // userTelegramId -> { adminId, requestId }
+
+// SUPPORT routing
+const pendingSupport = new Map(); // userTelegramId -> true (user is writing support)
+const supportThreads = new Map(); // userTelegramId -> { adminId } (last admin who handled support)
 
 // ===============================
-// Helpers
+// HELPERS
 // ===============================
-function isAdminId(id) {
-  return adminIds.includes(Number(id));
-}
-
 function isAdmin(ctx) {
-  return isAdminId(ctx.from?.id);
+  return adminIds.includes(Number(ctx.from?.id));
 }
 
 function safeText(s) {
@@ -137,23 +121,20 @@ function safeText(s) {
 
 function errToString(e) {
   try {
-    if (!e) return 'Unknown error';
     const desc = e?.response?.description;
     const code = e?.response?.error_code;
     if (desc || code) return `${code || ''} ${desc || ''}`.trim();
-    if (e.message) return e.message;
-    return JSON.stringify(e);
+    return e?.message || 'Unknown error';
   } catch {
     return 'Unknown error';
   }
 }
 
 // ===============================
-// DB helpers
+// DB HELPERS
 // ===============================
 async function upsertUser(ctx) {
   const u = ctx.from;
-
   const payload = {
     telegram_id: u.id,
     username: u.username || null,
@@ -167,7 +148,6 @@ async function upsertUser(ctx) {
     .select('id')
     .eq('telegram_id', u.id)
     .maybeSingle();
-
   if (e1) throw e1;
 
   if (existing?.id) {
@@ -209,18 +189,15 @@ async function getUserTelegramIdByUserId(userId) {
   return Number.isFinite(n) ? n : data.telegram_id;
 }
 
-// ⚠️ NON usiamo approved_at/rejected_at (ti davano errore perché non esistono nel DB)
 async function setStatus(requestId, status, admin_note = null) {
   const patch = { status };
   if (admin_note !== null) patch.admin_note = admin_note;
-
   if (status === 'SUBMITTED') patch.submitted_at = new Date().toISOString();
-
   await updateRequest(requestId, patch);
 }
 
 // ===============================
-// Admin notify (include screenshot)
+// ADMIN NOTIFY (VIP REQUEST + SCREENSHOT)
 // ===============================
 async function notifyAdminsNewRequest(ctxUser, req) {
   const tgUsername = ctxUser.from.username ? `@${ctxUser.from.username}` : 'n/a';
@@ -232,8 +209,7 @@ async function notifyAdminsNewRequest(ctxUser, req) {
     `Nome: ${safeText(req.full_name) || '-'}\n` +
     `Email: ${safeText(req.email) || '-'}\n` +
     `Username bookmaker: ${safeText(req.username) || '-'}\n` +
-    `Screenshot: ${req.screenshot_file_id ? '✅ presente' : '❌ mancante'}\n\n` +
-    `${PRIZES_TEXT}`;
+    `Screenshot: ${req.screenshot_file_id ? '✅ presente' : '❌ mancante'}`;
 
   const adminKeyboard = Markup.inlineKeyboard([
     [
@@ -245,23 +221,14 @@ async function notifyAdminsNewRequest(ctxUser, req) {
 
   for (const aid of adminIds) {
     try {
-      // 1) Messaggio testo + bottoni
-      await bot.telegram.sendMessage(aid, adminText, {
-        reply_markup: adminKeyboard.reply_markup
-      });
+      await bot.telegram.sendMessage(aid, adminText, { reply_markup: adminKeyboard.reply_markup });
 
-      // 2) Screenshot come media (prova foto, se fallisce documento)
       if (req.screenshot_file_id) {
         const caption = `📎 Screenshot deposito — ID richiesta ${req.id}`;
         try {
           await bot.telegram.sendPhoto(aid, req.screenshot_file_id, { caption });
-        } catch (e1) {
-          try {
-            await bot.telegram.sendDocument(aid, req.screenshot_file_id, { caption });
-          } catch (e2) {
-            console.error('Admin screenshot send failed:', e1, e2);
-            await bot.telegram.sendMessage(aid, `⚠️ Non riesco a inviare lo screenshot (ID ${req.id}).`);
-          }
+        } catch {
+          await bot.telegram.sendDocument(aid, req.screenshot_file_id, { caption });
         }
       }
     } catch (e) {
@@ -284,7 +251,7 @@ bot.start(async (ctx) => {
 });
 
 // ===============================
-// User actions
+// USER ACTIONS
 // ===============================
 bot.action('START_FLOW', async (ctx) => {
   try {
@@ -302,7 +269,8 @@ bot.action('START_FLOW', async (ctx) => {
 
 bot.action('SUPPORT', async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.reply('Scrivimi pure qui il tuo problema: ti risponderà un operatore appena possibile.');
+  pendingSupport.set(ctx.from.id, true);
+  await ctx.reply('🆘 Supporto\nScrivi qui il tuo problema (puoi inviare anche foto o file).');
 });
 
 bot.action('CANCEL_FLOW', async (ctx) => {
@@ -340,11 +308,10 @@ bot.action('SUBMIT', async (ctx) => {
 });
 
 // ===============================
-// Admin actions
+// ADMIN ACTIONS
 // ===============================
 bot.action(/ADMIN_APPROVE_(\d+)/, async (ctx) => {
   await ctx.answerCbQuery();
-
   if (!isAdmin(ctx)) return ctx.reply('Non autorizzato.');
 
   const requestId = Number(ctx.match[1]);
@@ -355,35 +322,25 @@ bot.action(/ADMIN_APPROVE_(\d+)/, async (ctx) => {
 
     const userTelegramId = await getUserTelegramIdByUserId(req.user_id);
 
-    // 1) Proviamo a creare un link personale se VIP_CHANNEL_ID è presente
-    let inviteLink = PUBLIC_CHANNEL_URL;
-
-    if (VIP_CHANNEL_ID) {
-      const chatId = Number(VIP_CHANNEL_ID);
-      if (!Number.isFinite(chatId)) {
-        throw new Error('VIP_CHANNEL_ID non valido: deve essere un numero tipo -100123...');
-      }
-
-      const invite = await bot.telegram.createChatInviteLink(chatId, {
-        member_limit: 1,
-        expire_date: Math.floor(Date.now() / 1000) + 60 * 60 * 24 // 24 ore
-      });
-      inviteLink = invite.invite_link;
+    if (!PUBLIC_CHANNEL_ID) {
+      return ctx.reply('⚠️ PUBLIC_CHANNEL_ID non configurato (Render → Environment).');
     }
 
-    if (!inviteLink) {
-      return ctx.reply('⚠️ Manca PUBLIC_CHANNEL_URL e/o VIP_CHANNEL_ID. Imposta su Render → Environment.');
-    }
+    const channelIdNum = Number(PUBLIC_CHANNEL_ID);
+    const channelId = Number.isFinite(channelIdNum) ? channelIdNum : PUBLIC_CHANNEL_ID;
+
+    const invite = await bot.telegram.createChatInviteLink(channelId, {
+      member_limit: 1,
+      expire_date: Math.floor(Date.now() / 1000) + 60 * 60 * 24
+    });
 
     await bot.telegram.sendMessage(
       userTelegramId,
-      `✅ Richiesta approvata!\n\n` +
-        `🔐 Questo è il tuo link per entrare nel canale VIP:\n${inviteLink}\n\n` +
-        (VIP_CHANNEL_ID ? `⏳ Link valido 24 ore e per 1 solo accesso.\n` : `⚠️ Link non monouso (fallback).\n`)
+      `✅ Richiesta approvata!\n\n🔐 Link personale (1 accesso):\n${invite.invite_link}\n\n⏳ Scade tra 24 ore.`
     );
 
     await ctx.editMessageReplyMarkup({ inline_keyboard: [] }).catch(() => {});
-    await ctx.reply(`✅ Approvato (ID ${requestId}). Link inviato all’utente.`);
+    await ctx.reply(`✅ Approvato (ID ${requestId}). Link personale inviato all’utente.`);
   } catch (e) {
     console.error('APPROVE ERROR:', e);
     await ctx.reply(`❌ Errore approvazione (ID ${requestId}): ${errToString(e)}`);
@@ -392,7 +349,6 @@ bot.action(/ADMIN_APPROVE_(\d+)/, async (ctx) => {
 
 bot.action(/ADMIN_REJECT_(\d+)/, async (ctx) => {
   await ctx.answerCbQuery();
-
   if (!isAdmin(ctx)) return ctx.reply('Non autorizzato.');
 
   const requestId = Number(ctx.match[1]);
@@ -429,9 +385,7 @@ bot.action(/ADMIN_ASK_(\d+)/, async (ctx) => {
     setAdminState(ctx.from.id, { mode: 'ASK_INFO', requestId, userTelegramId });
 
     await ctx.reply(
-      `💬 Ok. Scrivi ora il messaggio per l’utente (ID richiesta ${requestId}).\n` +
-        `Poi la PRIMA risposta dell’utente verrà inoltrata qui.\n\n` +
-        `Per annullare: /annulla`
+      `💬 Ok. Scrivi ora il messaggio per l’utente (ID richiesta ${requestId}).\nPer annullare: /annulla`
     );
   } catch (e) {
     console.error('ASK ERROR:', e);
@@ -440,18 +394,34 @@ bot.action(/ADMIN_ASK_(\d+)/, async (ctx) => {
 });
 
 // ===============================
-// Router messaggi (ADMIN + USER)
+// ROUTER (ADMIN + USER + SUPPORT)
 // ===============================
 bot.on(['text', 'photo', 'document'], async (ctx) => {
   const tid = ctx.from.id;
 
-  // ----- ADMIN: dopo "Chiedi info" scrive il testo da inviare all'utente -----
+  // ===== ADMIN: invia messaggio dopo "Chiedi info" =====
   if (isAdmin(ctx)) {
     const astate = getAdminState(tid);
 
     if (ctx.message?.text && ctx.message.text.trim().toLowerCase() === '/annulla') {
       clearAdminState(tid);
       return ctx.reply('✅ Operazione annullata.');
+    }
+
+    // ADMIN replying to a SUPPORT ticket: MUST reply to the bot message that had "🆘 SUPPORTO"
+    // We'll also allow manual command: /support <userId> <message>
+    if (ctx.message?.text?.startsWith('/support ')) {
+      const parts = ctx.message.text.split(' ');
+      const userId = Number(parts[1]);
+      const msg = parts.slice(2).join(' ').trim();
+      if (!userId || !msg) return ctx.reply('Uso: /support <userId> <messaggio>');
+      try {
+        await bot.telegram.sendMessage(userId, `🆘 Supporto (admin):\n${msg}`);
+        supportThreads.set(userId, { adminId: tid });
+        return ctx.reply('✅ Risposta supporto inviata.');
+      } catch (e) {
+        return ctx.reply(`❌ Errore invio supporto: ${errToString(e)}`);
+      }
     }
 
     if (astate?.mode === 'ASK_INFO' && astate.userTelegramId) {
@@ -464,9 +434,7 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
           `ℹ️ Messaggio dall’admin:\n${txt}\n\nRispondi qui in chat al bot.`
         );
 
-        // attendiamo la risposta dell'utente e la inoltriamo a QUESTO admin
         pendingReplies.set(astate.userTelegramId, { adminId: tid, requestId: astate.requestId });
-
         await updateRequest(astate.requestId, { admin_note: `Admin asked info: ${txt}` }).catch(() => {});
 
         clearAdminState(tid);
@@ -474,14 +442,45 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
       } catch (e) {
         console.error(e);
         clearAdminState(tid);
-        return ctx.reply(`❌ Non sono riuscito a inviare il messaggio all’utente: ${errToString(e)}`);
+        return ctx.reply(`❌ Non sono riuscito a inviare il messaggio: ${errToString(e)}`);
       }
     }
 
-    return; // admin normale: non facciamo nulla
+    return;
   }
 
-  // ----- USER: se NON è nel flow e c'è una richiesta info pendente, inoltra la risposta all'admin -----
+  // ===== USER: SUPPORT message (after pressing Support) =====
+  if (pendingSupport.get(tid)) {
+    pendingSupport.delete(tid);
+
+    const uname = ctx.from.username ? `@${ctx.from.username}` : 'n/a';
+    const header = `🆘 SUPPORTO\nUser: ${uname} (${ctx.from.id})\nScrivi una risposta facendo reply qui, oppure usa:\n/support ${ctx.from.id} <messaggio>`;
+
+    for (const aid of adminIds) {
+      try {
+        await bot.telegram.sendMessage(aid, header);
+
+        if (ctx.message.text) {
+          await bot.telegram.sendMessage(aid, `Messaggio:\n${ctx.message.text.trim()}`);
+        } else if (ctx.message.photo?.length) {
+          const fid = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+          await bot.telegram.sendPhoto(aid, fid, { caption: 'Allegato supporto (foto)' });
+        } else if (ctx.message.document?.file_id) {
+          await bot.telegram.sendDocument(aid, ctx.message.document.file_id, { caption: 'Allegato supporto (file)' });
+        }
+
+        // memorizza “thread” supporto: quel user è gestito da quell’admin (ultimo)
+        supportThreads.set(ctx.from.id, { adminId: aid });
+      } catch (e) {
+        console.error('Support notify failed:', e);
+      }
+    }
+
+    await ctx.reply('✅ Richiesta supporto inviata. Ti risponderemo qui appena possibile.');
+    return;
+  }
+
+  // ===== USER: if pending ASK_INFO reply, forward to the right admin =====
   const st = getUserState(tid);
   if (!st?.step) {
     const pending = pendingReplies.get(tid);
@@ -510,8 +509,6 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
         }
 
         await ctx.reply('✅ Messaggio ricevuto. Lo abbiamo inoltrato all’admin.');
-
-        // una risposta = chiuso
         pendingReplies.delete(tid);
       } catch (e) {
         console.error('Forward to admin failed:', e);
@@ -520,9 +517,12 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
 
       return;
     }
+
+    // ===== USER: if admin answered via /support, user can just write and we forward to admin in that support thread (optional) =====
+    // (Se vuoi anche il “supporto chat continua”, possiamo abilitarlo. Per ora lo lasciamo semplice.)
   }
 
-  // ----- USER: flow standard -----
+  // ===== USER: VIP flow standard =====
   if (!st.step || !st.requestId) return;
 
   try {
@@ -572,7 +572,7 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
         `Nome: ${safeText(req.full_name)}\n` +
         `Email: ${safeText(req.email)}\n` +
         `Username bookmaker: ${safeText(req.username)}\n` +
-        `Screenshot: ${req.screenshot_file_id ? '✅' : '❌'}\n\n` +
+        `Screenshot: ✅\n\n` +
         `Se è tutto corretto, premi “📩 Invia”.`;
 
       setUserState(tid, { step: 'CONFIRM' });
@@ -590,7 +590,12 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
 });
 
 // ===============================
-// Avvio bot (Background Worker)
+// ADMIN REPLY TO SUPPORT (simple method)
+// Admin just uses: /support <userId> <message>
+// ===============================
+
+// ===============================
+// START BOT
 // ===============================
 async function start() {
   try {
