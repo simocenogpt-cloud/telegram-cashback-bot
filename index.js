@@ -108,6 +108,11 @@ function inviteExplanationText(inviteCode) {
   );
 }
 
+function operatorLabelFromKey(key) {
+  const op = OPERATORS.find((o) => o.key === key);
+  return op?.label || key;
+}
+
 // ===============================
 // UI
 // ===============================
@@ -136,20 +141,22 @@ function prizesKeyboard() {
 
 function operatorsKeyboard() {
   return Markup.inlineKeyboard([
-    [
-      Markup.button.callback('Eurobet', 'OP_EUROBET'),
-      Markup.button.callback('bwin', 'OP_BWIN')
-    ],
-    [
-      Markup.button.callback('Betsson', 'OP_BETSSON'),
-      Markup.button.callback('Starcasino', 'OP_STARCASINO')
-    ]
+    [Markup.button.callback('Eurobet', 'OP_EUROBET'), Markup.button.callback('bwin', 'OP_BWIN')],
+    [Markup.button.callback('Betsson', 'OP_BETSSON'), Markup.button.callback('Starcasino', 'OP_STARCASINO')]
   ]);
 }
 
-function operatorLabelFromKey(key) {
-  const op = OPERATORS.find((o) => o.key === key);
-  return op?.label || key;
+// Footer sempre visibile sotto ai messaggi (così non resta solo “in cima” in chat)
+const footerMenu = Markup.inlineKeyboard([
+  [Markup.button.callback('🎁 Premi Invito', 'REF_STATUS')],
+  [Markup.button.callback('🆘 Supporto', 'SUPPORT')]
+]);
+
+// Helper: unisce una tastiera esistente + footerMenu
+function withFooter(kb) {
+  const base = kb?.reply_markup?.inline_keyboard || [];
+  const footer = footerMenu.reply_markup.inline_keyboard || [];
+  return Markup.inlineKeyboard([...base, ...footer]);
 }
 
 // ===============================
@@ -412,7 +419,7 @@ bot.start(async (ctx) => {
     await ctx.reply(introMessage(), mainMenu);
   } catch (e) {
     console.error(e);
-    await ctx.reply('Errore temporaneo. Riprova tra poco.');
+    await ctx.reply('Errore temporaneo. Riprova tra poco.', { reply_markup: footerMenu.reply_markup });
   }
 });
 
@@ -426,17 +433,19 @@ bot.action('START_FLOW', async (ctx) => {
     const requestId = await createDraftRequest(userDbId, 'vip_access');
 
     setUserState(ctx.from.id, { step: 'FULL_NAME', requestId, userDbId });
-    await ctx.reply('Perfetto ✅\n\nInserisci Nome e Cognome:');
+    await ctx.reply('Perfetto ✅\n\nInserisci Nome e Cognome:', { reply_markup: footerMenu.reply_markup });
   } catch (e) {
     console.error(e);
-    await ctx.reply('Errore. Riprova tra poco.');
+    await ctx.reply('Errore. Riprova tra poco.', { reply_markup: footerMenu.reply_markup });
   }
 });
 
 bot.action('SUPPORT', async (ctx) => {
   await ctx.answerCbQuery();
   pendingSupport.set(ctx.from.id, true);
-  await ctx.reply('🆘 Supporto\nScrivi qui il tuo problema (puoi inviare anche foto o file).');
+  await ctx.reply('🆘 Supporto\nScrivi qui il tuo problema (puoi inviare anche foto o file).', {
+    reply_markup: footerMenu.reply_markup
+  });
 });
 
 bot.action('REF_STATUS', async (ctx) => {
@@ -454,18 +463,20 @@ bot.action('REF_STATUS', async (ctx) => {
       `🎁 Premi disponibili ora: **${available}**\n\n` +
       `📌 Ogni 4 persone = 1 premio da **40€** (Amazon, Zalando, Airbnb, Apple, Spotify).\n\n` +
       (available > 0
-        ? `✅ Puoi richiedere un premio adesso: premi “Richiedi premio”.`
+        ? `✅ Puoi richiedere un premio adesso: premi “🎁 Richiedi premio”.`
         : `❌ Non hai ancora abbastanza persone (ti servono almeno 4).`);
 
-    const kb =
+    const baseKb =
       available > 0
         ? Markup.inlineKeyboard([[Markup.button.callback('🎁 Richiedi premio', 'CLAIM_REWARD')]])
         : Markup.inlineKeyboard([]);
 
-    await ctx.reply(txt, { reply_markup: kb.reply_markup });
+    const kb = withFooter(baseKb);
+
+    await ctx.reply(txt, { reply_markup: kb.reply_markup, parse_mode: 'Markdown' });
   } catch (e) {
     console.error(e);
-    await ctx.reply(`❌ Errore: ${errToString(e)}`);
+    await ctx.reply(`❌ Errore: ${errToString(e)}`, { reply_markup: footerMenu.reply_markup });
   }
 });
 
@@ -479,16 +490,18 @@ bot.action('CLAIM_REWARD', async (ctx) => {
     const available = Math.floor(count / 4);
 
     if (available <= 0) {
-      return ctx.reply('❌ Non hai ancora 4 persone portate. Quando arrivi a 4 potrai richiedere un premio.');
+      return ctx.reply('❌ Non hai ancora 4 persone portate. Quando arrivi a 4 potrai richiedere un premio.', {
+        reply_markup: footerMenu.reply_markup
+      });
     }
 
     await ctx.reply(
       `🎁 Scegli quale buono vuoi richiedere (valore **40€**).\n\n` + `Premi disponibili adesso: **${available}**`,
-      prizesKeyboard()
+      withFooter(prizesKeyboard())
     );
   } catch (e) {
     console.error(e);
-    await ctx.reply(`❌ Errore: ${errToString(e)}`);
+    await ctx.reply(`❌ Errore: ${errToString(e)}`, { reply_markup: footerMenu.reply_markup });
   }
 });
 
@@ -496,17 +509,25 @@ bot.action(/PRIZE_(.+)/, async (ctx) => {
   try {
     await ctx.answerCbQuery().catch(() => {});
     const prize = String(ctx.match[1] || '').trim();
-    if (!PRIZES_LIST.includes(prize)) return ctx.reply('Premio non valido.');
+    if (!PRIZES_LIST.includes(prize)) {
+      return ctx.reply('Premio non valido.', { reply_markup: footerMenu.reply_markup });
+    }
 
     const userDbId = await upsertUser(ctx);
     const row = await getInviteRowByUserId(userDbId);
 
     const count = Number(row.referrals_count || 0);
-    if (count < 4) return ctx.reply('❌ Non hai ancora 4 persone portate. Non puoi richiedere premi.');
+    if (count < 4) {
+      return ctx.reply('❌ Non hai ancora 4 persone portate. Non puoi richiedere premi.', {
+        reply_markup: footerMenu.reply_markup
+      });
+    }
 
-    // scala 4 dal contatore
+    // scala 4 dal contatore (come richiesto)
     const dec = await decrementReferralsBy4(userDbId);
-    if (!dec.ok) return ctx.reply('❌ Non hai abbastanza persone (minimo 4).');
+    if (!dec.ok) {
+      return ctx.reply('❌ Non hai abbastanza persone (minimo 4).', { reply_markup: footerMenu.reply_markup });
+    }
 
     // registra richiesta premio
     const { error: insErr } = await supabase.from('invite_redemptions').insert({
@@ -537,11 +558,13 @@ bot.action(/PRIZE_(.+)/, async (ctx) => {
       `✅ Richiesta inviata!\n\n` +
         `🎁 Premio scelto: **${prize}** (40€)\n` +
         `⏱️ Ti contatteremo qui appena pronto.\n\n` +
-        `📌 Premi disponibili ora: **${availableNow}**`
+        `👥 Persone portate ora: **${dec.count}**\n` +
+        `🎁 Premi disponibili ora: **${availableNow}**`,
+      { parse_mode: 'Markdown', reply_markup: footerMenu.reply_markup }
     );
   } catch (e) {
     console.error(e);
-    await ctx.reply(`❌ Errore: ${errToString(e)}`);
+    await ctx.reply(`❌ Errore: ${errToString(e)}`, { reply_markup: footerMenu.reply_markup });
   }
 });
 
@@ -557,7 +580,7 @@ bot.action('EDIT', async (ctx) => {
   if (!st.requestId) return ctx.reply('Sessione scaduta. Riparti dal menu.', mainMenu);
 
   setUserState(ctx.from.id, { step: 'FULL_NAME' });
-  await ctx.reply('Ok, reinserisci Nome e Cognome:');
+  await ctx.reply('Ok, reinserisci Nome e Cognome:', { reply_markup: footerMenu.reply_markup });
 });
 
 bot.action('SKIP_INVITE', async (ctx) => {
@@ -567,7 +590,9 @@ bot.action('SKIP_INVITE', async (ctx) => {
 
   await updateRequest(st.requestId, { invite_code: null });
   setUserState(ctx.from.id, { step: 'SCREENSHOT' });
-  await ctx.reply('Ok 👍\nOra invia lo screenshot del deposito (foto o file).');
+  await ctx.reply('Ok 👍\nOra invia lo screenshot del deposito (foto o file).', {
+    reply_markup: footerMenu.reply_markup
+  });
 });
 
 // ====== NUOVO: scelta operatore ======
@@ -585,11 +610,11 @@ bot.action(/OP_(EUROBET|BWIN|BETSSON|STARCASINO)/, async (ctx) => {
 
     await ctx.reply(
       `✅ Operatore selezionato: *${label}*\n\nOra inserisci il tuo *ID operatore* (quello del conto sul bookmaker):`,
-      { parse_mode: 'Markdown' }
+      { parse_mode: 'Markdown', reply_markup: footerMenu.reply_markup }
     );
   } catch (e) {
     console.error(e);
-    await ctx.reply(`❌ Errore: ${errToString(e)}`);
+    await ctx.reply(`❌ Errore: ${errToString(e)}`, { reply_markup: footerMenu.reply_markup });
   }
 });
 
@@ -608,10 +633,12 @@ bot.action('SUBMIT', async (ctx) => {
     await notifyAdminsNewRequest(ctx, req);
 
     clearUserState(ctx.from.id);
-    await ctx.reply('✅ Richiesta inviata! Ti aggiorniamo dopo la verifica (entro 72 ore).');
+    await ctx.reply('✅ Richiesta inviata! Ti aggiorniamo dopo la verifica (entro 72 ore).', {
+      reply_markup: footerMenu.reply_markup
+    });
   } catch (e) {
     console.error(e);
-    await ctx.reply('Errore durante invio. Riprova.');
+    await ctx.reply('Errore durante invio. Riprova.', { reply_markup: footerMenu.reply_markup });
   }
 });
 
@@ -625,10 +652,12 @@ async function applyInviteReferralIfAny(req) {
   const code = codeRaw.toUpperCase();
 
   const inviter = await getInviteRowByCode(code);
-  if (!inviter?.user_id) return;
+  if (!inviter?.user_id) return; // codice inesistente -> ignoriamo
 
+  // non permettere self-referral
   if (Number(inviter.user_id) === Number(req.user_id)) return;
 
+  // protezione: conta 1 sola volta per request
   const note = safeText(req.admin_note || '');
   if (note.includes('[INVITE_COUNTED]')) return;
 
@@ -653,6 +682,7 @@ bot.action(/ADMIN_APPROVE_(\d+)/, async (ctx) => {
 
     const userTelegramId = await getUserTelegramIdByUserId(req.user_id);
 
+    // link canale
     let inviteLink = PUBLIC_CHANNEL_URL;
     const vipChatId = getVipChannelId();
     if (vipChatId) {
@@ -666,6 +696,7 @@ bot.action(/ADMIN_APPROVE_(\d+)/, async (ctx) => {
       return ctx.reply('⚠️ Manca PUBLIC_CHANNEL_URL e/o VIP_CHANNEL_ID (Render → Environment).');
     }
 
+    // codice invito dell'utente (generato/assicurato)
     const userInvite = await ensureInviteCode(req.user_id);
 
     await bot.telegram.sendMessage(
@@ -842,7 +873,9 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
       }
     }
 
-    await ctx.reply('✅ Richiesta supporto inviata. Ti risponderemo qui appena possibile.');
+    await ctx.reply('✅ Richiesta supporto inviata. Ti risponderemo qui appena possibile.', {
+      reply_markup: footerMenu.reply_markup
+    });
     return;
   }
 
@@ -874,11 +907,15 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
           });
         }
 
-        await ctx.reply('✅ Messaggio ricevuto. Lo abbiamo inoltrato all’admin.');
+        await ctx.reply('✅ Messaggio ricevuto. Lo abbiamo inoltrato all’admin.', {
+          reply_markup: footerMenu.reply_markup
+        });
         pendingReplies.delete(tid);
       } catch (e) {
         console.error('Forward to admin failed:', e);
-        await ctx.reply('❌ Errore: non sono riuscito a inoltrare la risposta all’admin. Riprova.');
+        await ctx.reply('❌ Errore: non sono riuscito a inoltrare la risposta all’admin. Riprova.', {
+          reply_markup: footerMenu.reply_markup
+        });
       }
       return;
     }
@@ -889,20 +926,19 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
 
   try {
     const requireText = async (msg) => {
-      await ctx.reply(msg, { parse_mode: 'Markdown' });
+      await ctx.reply(msg, { parse_mode: 'Markdown', reply_markup: footerMenu.reply_markup });
       return true;
     };
 
     if (st.step === 'FULL_NAME') {
       if (!ctx.message.text) return requireText('❗️Inserisci *solo testo*: Nome e Cognome (niente foto/file).');
       const fullName = ctx.message.text.trim();
-      if (fullName.length < 3) return ctx.reply('Nome non valido. Reinserisci Nome e Cognome:');
+      if (fullName.length < 3) return ctx.reply('Nome non valido. Reinserisci Nome e Cognome:', { reply_markup: footerMenu.reply_markup });
 
       await updateRequest(st.requestId, { full_name: fullName });
 
-      // nuovo step: scelta operatore
       setUserState(tid, { step: 'OPERATOR' });
-      return ctx.reply('Seleziona l’operatore scelto:', operatorsKeyboard());
+      return ctx.reply('Seleziona l’operatore scelto:', withFooter(operatorsKeyboard()));
     }
 
     // Step OPERATOR è gestito dai bot.action OP_...
@@ -910,25 +946,28 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
     if (st.step === 'OPERATOR_ID') {
       if (!ctx.message.text) return requireText('❗️Inserisci *solo testo*: il tuo ID operatore (niente foto/file).');
       const opId = ctx.message.text.trim();
-      if (opId.length < 2) return ctx.reply('Valore non valido. Reinserisci il tuo ID operatore:');
+      if (opId.length < 2) return ctx.reply('Valore non valido. Reinserisci il tuo ID operatore:', { reply_markup: footerMenu.reply_markup });
 
       await updateRequest(st.requestId, { operator_user_id: opId });
 
       setUserState(tid, { step: 'INVITE_CODE' });
       return ctx.reply(
         '🎟️ Hai un *Codice Invito*?\n\n' + 'Se ce l’hai, scrivilo adesso.\nAltrimenti premi “Salta”.',
-        { parse_mode: 'Markdown', reply_markup: skipInviteMenu.reply_markup }
+        { parse_mode: 'Markdown', reply_markup: withFooter(skipInviteMenu).reply_markup }
       );
     }
 
     if (st.step === 'INVITE_CODE') {
       if (!ctx.message.text) return requireText('❗️Inserisci *solo testo*: Codice Invito, oppure premi “Salta”.');
       const code = ctx.message.text.trim();
-      if (code.length < 4) return ctx.reply('Codice troppo corto. Reinserisci oppure premi “Salta”.');
+      if (code.length < 4) return ctx.reply('Codice troppo corto. Reinserisci oppure premi “Salta”.', { reply_markup: withFooter(skipInviteMenu).reply_markup });
 
+      // salviamo comunque quello che scrive (validità “soft”)
       await updateRequest(st.requestId, { invite_code: code.toUpperCase() });
       setUserState(tid, { step: 'SCREENSHOT' });
-      return ctx.reply('Perfetto ✅\nOra invia lo screenshot del deposito (foto o file).');
+      return ctx.reply('Perfetto ✅\nOra invia lo screenshot del deposito (foto o file).', {
+        reply_markup: footerMenu.reply_markup
+      });
     }
 
     if (st.step === 'SCREENSHOT') {
@@ -942,7 +981,10 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
         fileId = ctx.message.document.file_id;
         mime = ctx.message.document.mime_type || 'document';
       } else {
-        return ctx.reply('❗️In questo step devi inviare *uno screenshot* (foto o file).', { parse_mode: 'Markdown' });
+        return ctx.reply('❗️In questo step devi inviare *uno screenshot* (foto o file).', {
+          parse_mode: 'Markdown',
+          reply_markup: footerMenu.reply_markup
+        });
       }
 
       await updateRequest(st.requestId, { screenshot_file_id: fileId, screenshot_mime: mime });
@@ -958,11 +1000,11 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
         `Se è tutto corretto, premi “📩 Invia”.`;
 
       setUserState(tid, { step: 'CONFIRM' });
-      return ctx.reply(summary, confirmMenu);
+      return ctx.reply(summary, withFooter(confirmMenu));
     }
 
     if (st.step === 'CONFIRM') {
-      return ctx.reply('Usa i pulsanti sotto per inviare/modificare.', confirmMenu);
+      return ctx.reply('Usa i pulsanti sotto per inviare/modificare.', withFooter(confirmMenu));
     }
   } catch (e) {
     console.error(e);
