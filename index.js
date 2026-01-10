@@ -42,15 +42,38 @@ const bot = new Telegraf(BOT_TOKEN);
 // ===============================
 const PRIZES_LIST = ['Amazon', 'Zalando', 'Airbnb', 'Apple', 'Spotify'];
 
+const OPERATORS = [
+  {
+    key: 'EUROBET',
+    label: 'Eurobet',
+    link: 'https://record.betpartners.it/_Klv9utJ3bqpKqXDxdQZqW2Nd7ZgqdRLk/1/'
+  },
+  {
+    key: 'BWIN',
+    label: 'bwin',
+    link: 'https://www.bwin.it/it/engage/lan/s/p/sports/accaboost?wm=5596580'
+  },
+  {
+    key: 'BETSSON',
+    label: 'Betsson',
+    link: 'https://record.betsson.it/_dYA2EWAR45qw8pi7H3I6R2Nd7ZgqdRLk/1/'
+  },
+  {
+    key: 'STARCASINO',
+    label: 'Starcasino',
+    link: 'https://record.starcasino.it/_dYA2EWAR45rPSO5RLscKcGNd7ZgqdRLk/1/'
+  }
+];
+
 function introMessage() {
   return `🔥 Richiesta accesso VIP + Premi 🔥
 
 Per partecipare:
 1️⃣ Registrati su UNO di questi link:
-• Eurobet: https://record.betpartners.it/_Klv9utJ3bqpKqXDxdQZqW2Nd7ZgqdRLk/1/
-• bwin: https://www.bwin.it/it/engage/lan/s/p/sports/accaboost?wm=5596580
-• Betsson: https://record.betsson.it/_dYA2EWAR45qw8pi7H3I6R2Nd7ZgqdRLk/1/
-• Starcasino: https://record.starcasino.it/_dYA2EWAR45rPSO5RLscKcGNd7ZgqdRLk/1/
+• Eurobet: ${OPERATORS.find((o) => o.key === 'EUROBET')?.link}
+• bwin: ${OPERATORS.find((o) => o.key === 'BWIN')?.link}
+• Betsson: ${OPERATORS.find((o) => o.key === 'BETSSON')?.link}
+• Starcasino: ${OPERATORS.find((o) => o.key === 'STARCASINO')?.link}
 
 2️⃣ Effettua un deposito (seguendo le regole della promo/link)
 3️⃣ Invia qui i dati richiesti + screenshot deposito
@@ -100,9 +123,7 @@ const confirmMenu = Markup.inlineKeyboard([
   [Markup.button.callback('↩️ Annulla', 'CANCEL_FLOW')]
 ]);
 
-const skipInviteMenu = Markup.inlineKeyboard([
-  [Markup.button.callback('⏭️ Salta (non ho un codice)', 'SKIP_INVITE')]
-]);
+const skipInviteMenu = Markup.inlineKeyboard([[Markup.button.callback('⏭️ Salta (non ho un codice)', 'SKIP_INVITE')]]);
 
 function prizesKeyboard() {
   return Markup.inlineKeyboard([
@@ -111,6 +132,24 @@ function prizesKeyboard() {
     [Markup.button.callback('Spotify', 'PRIZE_Spotify')],
     [Markup.button.callback('↩️ Indietro', 'REF_STATUS')]
   ]);
+}
+
+function operatorsKeyboard() {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback('Eurobet', 'OP_EUROBET'),
+      Markup.button.callback('bwin', 'OP_BWIN')
+    ],
+    [
+      Markup.button.callback('Betsson', 'OP_BETSSON'),
+      Markup.button.callback('Starcasino', 'OP_STARCASINO')
+    ]
+  ]);
+}
+
+function operatorLabelFromKey(key) {
+  const op = OPERATORS.find((o) => o.key === key);
+  return op?.label || key;
 }
 
 // ===============================
@@ -235,21 +274,13 @@ async function ensureInviteCode(userId) {
 }
 
 async function getInviteRowByUserId(userId) {
-  const { data, error } = await supabase
-    .from('user_invites')
-    .select('*')
-    .eq('user_id', userId)
-    .single();
+  const { data, error } = await supabase.from('user_invites').select('*').eq('user_id', userId).single();
   if (error) throw error;
   return data;
 }
 
 async function getInviteRowByCode(code) {
-  const { data, error } = await supabase
-    .from('user_invites')
-    .select('*')
-    .eq('code', code)
-    .maybeSingle();
+  const { data, error } = await supabase.from('user_invites').select('*').eq('code', code).maybeSingle();
   if (error) throw error;
   return data;
 }
@@ -318,8 +349,8 @@ async function notifyAdminsNewRequest(ctxUser, req) {
     `ID: ${req.id}\n` +
     `User TG: ${tgUsername} (${ctxUser.from.id})\n` +
     `Nome: ${safeText(req.full_name) || '-'}\n` +
-    `Email: ${safeText(req.email) || '-'}\n` +
-    `Username bookmaker: ${safeText(req.username) || '-'}\n` +
+    `Operatore scelto: ${safeText(req.operator) || '-'}\n` +
+    `ID operatore: ${safeText(req.operator_user_id) || '-'}\n` +
     `Codice invito inserito: ${safeText(req.invite_code) || '-'}\n` +
     `Screenshot: ${req.screenshot_file_id ? '✅ presente' : '❌ mancante'}`;
 
@@ -452,8 +483,7 @@ bot.action('CLAIM_REWARD', async (ctx) => {
     }
 
     await ctx.reply(
-      `🎁 Scegli quale buono vuoi richiedere (valore **40€**).\n\n` +
-        `Premi disponibili adesso: **${available}**`,
+      `🎁 Scegli quale buono vuoi richiedere (valore **40€**).\n\n` + `Premi disponibili adesso: **${available}**`,
       prizesKeyboard()
     );
   } catch (e) {
@@ -474,7 +504,7 @@ bot.action(/PRIZE_(.+)/, async (ctx) => {
     const count = Number(row.referrals_count || 0);
     if (count < 4) return ctx.reply('❌ Non hai ancora 4 persone portate. Non puoi richiedere premi.');
 
-    // scala 4 dal contatore (come mi hai chiesto)
+    // scala 4 dal contatore
     const dec = await decrementReferralsBy4(userDbId);
     if (!dec.ok) return ctx.reply('❌ Non hai abbastanza persone (minimo 4).');
 
@@ -540,6 +570,29 @@ bot.action('SKIP_INVITE', async (ctx) => {
   await ctx.reply('Ok 👍\nOra invia lo screenshot del deposito (foto o file).');
 });
 
+// ====== NUOVO: scelta operatore ======
+bot.action(/OP_(EUROBET|BWIN|BETSSON|STARCASINO)/, async (ctx) => {
+  try {
+    await ctx.answerCbQuery().catch(() => {});
+    const st = getUserState(ctx.from.id);
+    if (!st?.requestId) return ctx.reply('Sessione scaduta. Riparti dal menu.', mainMenu);
+
+    const key = String(ctx.match[1] || '').trim();
+    const label = operatorLabelFromKey(key);
+
+    await updateRequest(st.requestId, { operator: label });
+    setUserState(ctx.from.id, { step: 'OPERATOR_ID' });
+
+    await ctx.reply(
+      `✅ Operatore selezionato: *${label}*\n\nOra inserisci il tuo *ID operatore* (quello del conto sul bookmaker):`,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (e) {
+    console.error(e);
+    await ctx.reply(`❌ Errore: ${errToString(e)}`);
+  }
+});
+
 bot.action('SUBMIT', async (ctx) => {
   try {
     await ctx.answerCbQuery();
@@ -569,19 +622,13 @@ async function applyInviteReferralIfAny(req) {
   const codeRaw = safeText(req.invite_code || '').trim();
   if (!codeRaw) return;
 
-  // normalizza un minimo
   const code = codeRaw.toUpperCase();
 
-  // prendi inviter
   const inviter = await getInviteRowByCode(code);
-  if (!inviter?.user_id) return; // codice inesistente -> ignoriamo (non blocchiamo)
+  if (!inviter?.user_id) return;
 
-  // non permettere self-referral
   if (Number(inviter.user_id) === Number(req.user_id)) return;
 
-  // protezione: conta 1 sola volta per request
-  // (se ri-sottomette o riprova, non vogliamo incrementare)
-  // Segniamo su cashback_requests un flag minimale via admin_note
   const note = safeText(req.admin_note || '');
   if (note.includes('[INVITE_COUNTED]')) return;
 
@@ -606,7 +653,6 @@ bot.action(/ADMIN_APPROVE_(\d+)/, async (ctx) => {
 
     const userTelegramId = await getUserTelegramIdByUserId(req.user_id);
 
-    // link canale (come prima)
     let inviteLink = PUBLIC_CHANNEL_URL;
     const vipChatId = getVipChannelId();
     if (vipChatId) {
@@ -620,7 +666,6 @@ bot.action(/ADMIN_APPROVE_(\d+)/, async (ctx) => {
       return ctx.reply('⚠️ Manca PUBLIC_CHANNEL_URL e/o VIP_CHANNEL_ID (Render → Environment).');
     }
 
-    // codice invito dell'utente (generato/assicurato)
     const userInvite = await ensureInviteCode(req.user_id);
 
     await bot.telegram.sendMessage(
@@ -852,30 +897,26 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
       if (!ctx.message.text) return requireText('❗️Inserisci *solo testo*: Nome e Cognome (niente foto/file).');
       const fullName = ctx.message.text.trim();
       if (fullName.length < 3) return ctx.reply('Nome non valido. Reinserisci Nome e Cognome:');
+
       await updateRequest(st.requestId, { full_name: fullName });
-      setUserState(tid, { step: 'EMAIL' });
-      return ctx.reply('Inserisci Email usata per la registrazione:');
+
+      // nuovo step: scelta operatore
+      setUserState(tid, { step: 'OPERATOR' });
+      return ctx.reply('Seleziona l’operatore scelto:', operatorsKeyboard());
     }
 
-    if (st.step === 'EMAIL') {
-      if (!ctx.message.text) return requireText('❗️Inserisci *solo testo*: la tua Email (niente foto/file).');
-      const email = ctx.message.text.trim();
-      const emailOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-      if (!emailOk) return ctx.reply('Email non valida. Reinserisci:');
-      await updateRequest(st.requestId, { email });
-      setUserState(tid, { step: 'USERNAME' });
-      return ctx.reply('Inserisci Username / ID usato sul bookmaker (quello del conto):');
-    }
+    // Step OPERATOR è gestito dai bot.action OP_...
 
-    if (st.step === 'USERNAME') {
-      if (!ctx.message.text) return requireText('❗️Inserisci *solo testo*: Username/ID bookmaker (niente foto/file).');
-      const uname = ctx.message.text.trim();
-      if (uname.length < 2) return ctx.reply('Valore non valido. Reinserisci Username/ID:');
-      await updateRequest(st.requestId, { username: uname });
+    if (st.step === 'OPERATOR_ID') {
+      if (!ctx.message.text) return requireText('❗️Inserisci *solo testo*: il tuo ID operatore (niente foto/file).');
+      const opId = ctx.message.text.trim();
+      if (opId.length < 2) return ctx.reply('Valore non valido. Reinserisci il tuo ID operatore:');
+
+      await updateRequest(st.requestId, { operator_user_id: opId });
+
       setUserState(tid, { step: 'INVITE_CODE' });
       return ctx.reply(
-        '🎟️ Hai un *Codice Invito*?\n\n' +
-          'Se ce l’hai, scrivilo adesso.\nAltrimenti premi “Salta”.',
+        '🎟️ Hai un *Codice Invito*?\n\n' + 'Se ce l’hai, scrivilo adesso.\nAltrimenti premi “Salta”.',
         { parse_mode: 'Markdown', reply_markup: skipInviteMenu.reply_markup }
       );
     }
@@ -885,7 +926,6 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
       const code = ctx.message.text.trim();
       if (code.length < 4) return ctx.reply('Codice troppo corto. Reinserisci oppure premi “Salta”.');
 
-      // salviamo comunque quello che scrive (validità la gestiamo “soft”)
       await updateRequest(st.requestId, { invite_code: code.toUpperCase() });
       setUserState(tid, { step: 'SCREENSHOT' });
       return ctx.reply('Perfetto ✅\nOra invia lo screenshot del deposito (foto o file).');
@@ -911,8 +951,8 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
       const summary =
         `📋 Riepilogo richiesta\n` +
         `Nome: ${safeText(req.full_name)}\n` +
-        `Email: ${safeText(req.email)}\n` +
-        `Username bookmaker: ${safeText(req.username)}\n` +
+        `Operatore scelto: ${safeText(req.operator) || '-'}\n` +
+        `ID operatore: ${safeText(req.operator_user_id) || '-'}\n` +
         `Codice invito: ${safeText(req.invite_code) || '-'}\n` +
         `Screenshot: ✅\n\n` +
         `Se è tutto corretto, premi “📩 Invia”.`;
