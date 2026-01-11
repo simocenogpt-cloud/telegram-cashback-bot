@@ -113,6 +113,11 @@ function operatorLabelFromKey(key) {
   return op?.label || key;
 }
 
+function operatorKeyFromLabel(label) {
+  const op = OPERATORS.find((o) => String(o.label).toLowerCase() === String(label).toLowerCase());
+  return op?.key || null;
+}
+
 // ===============================
 // UI
 // ===============================
@@ -143,11 +148,25 @@ function prizesKeyboard() {
   ]);
 }
 
-function operatorsKeyboard() {
-  return Markup.inlineKeyboard([
-    [Markup.button.callback('Eurobet', 'OP_EUROBET'), Markup.button.callback('bwin', 'OP_BWIN')],
-    [Markup.button.callback('Betsson', 'OP_BETSSON'), Markup.button.callback('Starcasino', 'OP_STARCASINO')]
-  ]);
+/**
+ * Tastiera operatori con possibilità di escludere alcuni operator_key (già approvati)
+ */
+function operatorsKeyboard(excludeKeys = []) {
+  const ex = new Set((excludeKeys || []).map((x) => String(x).toUpperCase()));
+
+  const rows = [];
+  const row1 = [];
+  if (!ex.has('EUROBET')) row1.push(Markup.button.callback('Eurobet', 'OP_EUROBET'));
+  if (!ex.has('BWIN')) row1.push(Markup.button.callback('bwin', 'OP_BWIN'));
+  if (row1.length) rows.push(row1);
+
+  const row2 = [];
+  if (!ex.has('BETSSON')) row2.push(Markup.button.callback('Betsson', 'OP_BETSSON'));
+  if (!ex.has('STARCASINO')) row2.push(Markup.button.callback('Starcasino', 'OP_STARCASINO'));
+  if (row2.length) rows.push(row2);
+
+  // se tutti esclusi, ritorna tastiera vuota
+  return Markup.inlineKeyboard(rows);
 }
 
 // ===============================
@@ -249,7 +268,6 @@ async function ensureInviteCode(userId) {
 
   if (row?.code) return row.code;
 
-  // genera e inserisci un codice unico
   for (let i = 0; i < 8; i++) {
     const code = `VIP-${makeRandomCode(8)}`;
     const { data: inserted, error: insErr } = await supabase
@@ -260,7 +278,6 @@ async function ensureInviteCode(userId) {
 
     if (!insErr && inserted?.code) return inserted.code;
 
-    // se collisione su unique(code) -> riprova
     const msg = String(insErr?.message || '');
     if (!msg.toLowerCase().includes('duplicate') && !msg.toLowerCase().includes('unique')) {
       throw insErr;
@@ -287,7 +304,6 @@ async function rolloverMonthlyIfNeeded(inviteRow) {
   const currentKey = safeText(inviteRow.referrals_month_key || '').trim();
 
   if (!currentKey) {
-    // prima inizializzazione
     const { error } = await supabase
       .from('user_invites')
       .update({ referrals_month_key: nowKey })
@@ -298,7 +314,6 @@ async function rolloverMonthlyIfNeeded(inviteRow) {
 
   if (currentKey === nowKey) return inviteRow;
 
-  // Cambio mese: sposta month -> prev, azzera month, aggiorna month_key
   const prev = Number(inviteRow.referrals_month || 0);
 
   const patch = {
@@ -313,16 +328,8 @@ async function rolloverMonthlyIfNeeded(inviteRow) {
   return { ...inviteRow, ...patch };
 }
 
-/**
- * Incrementa TUTTI i contatori:
- * - referrals_count (spendibile / per premi) -> aumenta
- * - referrals_total (storico) -> aumenta
- * - referrals_month (mese corrente) -> aumenta (con rollover automatico a cambio mese)
- */
 async function incrementReferrals(inviterUserId, amount = 1) {
   let current = await getInviteRowByUserId(inviterUserId);
-
-  // rollover mese se necessario
   current = await rolloverMonthlyIfNeeded(current);
 
   const nextSpendable = Number(current.referrals_count || 0) + amount;
@@ -349,7 +356,6 @@ async function decrementReferralsBy4(userId) {
   if (count < 4) return { ok: false, count };
   const next = count - 4;
 
-  // decrementiamo SOLO referrals_count (spendibile). Totale e mensili NON devono diminuire.
   const { error } = await supabase.from('user_invites').update({ referrals_count: next }).eq('user_id', userId);
   if (error) throw error;
   return { ok: true, count: next };
@@ -403,6 +409,44 @@ async function isVipApproved(userId) {
   return Array.isArray(data) && data.length > 0;
 }
 
+/**
+ * ✅ NUOVO: operatori già APPROVATI per questo utente
+ * serve per:
+ * - non far scegliere lo stesso operatore due volte
+ * - bloccare click su operatore già approvato
+ */
+async function getApprovedOperatorKeysForUser(userId) {
+  const { data, error } = await supabase
+    .from('cashback_requests')
+    .select('operator')
+    .eq('user_id', userId)
+    .eq('campaign', 'vip_access')
+    .eq('status', 'APPROVED');
+
+  if (error) throw error;
+
+  const keys = new Set();
+  for (const r of data || []) {
+    const k = operatorKeyFromLabel(r.operator);
+    if (k) keys.add(k);
+  }
+  return Array.from(keys);
+}
+
+async function hasApprovedForOperator(userId, operatorLabel) {
+  const { data, error } = await supabase
+    .from('cashback_requests')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('campaign', 'vip_access')
+    .eq('status', 'APPROVED')
+    .eq('operator', operatorLabel)
+    .limit(1);
+
+  if (error) throw error;
+  return Array.isArray(data) && data.length > 0;
+}
+
 // ===============================
 // APPLY INVITE CODE (SOLO A APPROVAZIONE ADMIN)
 // ===============================
@@ -415,10 +459,8 @@ async function applyInviteReferralIfAny(req) {
   const inviter = await getInviteRowByCode(code);
   if (!inviter?.user_id) return { applied: false, reason: 'code_not_found' };
 
-  // no self-referral
   if (Number(inviter.user_id) === Number(req.user_id)) return { applied: false, reason: 'self_ref' };
 
-  // conta una volta sola per request
   const note = safeText(req.admin_note || '');
   if (note.includes('[INVITE_COUNTED]')) return { applied: false, reason: 'already_counted' };
 
@@ -501,7 +543,7 @@ async function notifyAdminsSupportTicket(ctxUser) {
 bot.start(async (ctx) => {
   try {
     await upsertUser(ctx);
-    await ctx.reply(introMessage(), mainMenuPreApproval); // supporto solo qui
+    await ctx.reply(introMessage(), mainMenuPreApproval);
   } catch (e) {
     console.error(e);
     await ctx.reply('Errore temporaneo. Riprova tra poco.');
@@ -540,7 +582,6 @@ bot.action('REF_STATUS', async (ctx) => {
     const approved = await isVipApproved(userDbId);
     if (!approved) return ctx.reply('🔒 Funzione disponibile solo dopo l’approvazione dell’accesso VIP.');
 
-    // rollover mese (così i contatori mensili restano corretti)
     let row = await getInviteRowByUserId(userDbId);
     row = await rolloverMonthlyIfNeeded(row);
 
@@ -568,6 +609,55 @@ bot.action('REF_STATUS', async (ctx) => {
     ]);
 
     await ctx.reply(txt, { reply_markup: merged.reply_markup, parse_mode: 'Markdown' });
+  } catch (e) {
+    console.error(e);
+    await ctx.reply(`❌ Errore: ${errToString(e)}`);
+  }
+});
+
+// ===============================
+// VIP FLOW - OPERATOR SELECT BLOCK (SECURITY)
+// ===============================
+
+// scelta operatore
+bot.action(/OP_(EUROBET|BWIN|BETSSON|STARCASINO)/, async (ctx) => {
+  try {
+    await ctx.answerCbQuery().catch(() => {});
+    const st = getUserState(ctx.from.id);
+    if (!st?.requestId || !st?.userDbId) return ctx.reply('Sessione scaduta. Riparti dal menu.');
+
+    const key = String(ctx.match[1] || '').trim().toUpperCase();
+    const label = operatorLabelFromKey(key);
+
+    // ✅ BLOCCO: se ha già un APPROVED su questo operatore, errore e proponi gli altri
+    const alreadyApproved = await hasApprovedForOperator(st.userDbId, label);
+    if (alreadyApproved) {
+      const approvedKeys = await getApprovedOperatorKeysForUser(st.userDbId);
+      const kb = operatorsKeyboard(approvedKeys);
+
+      if (!kb?.reply_markup?.inline_keyboard?.length) {
+        clearUserState(ctx.from.id);
+        return ctx.reply(
+          `❌ Ti sei già registrato ed eri già stato autorizzato su *${label}*.\n\n` +
+            `Hai già usato tutti gli operatori disponibili.`,
+          { parse_mode: 'Markdown' }
+        );
+      }
+
+      return ctx.reply(
+        `❌ Ti sei già registrato ed eri già stato autorizzato su *${label}*.\n\n` +
+          `Scegli uno tra gli altri operatori:`,
+        { parse_mode: 'Markdown', reply_markup: kb.reply_markup }
+      );
+    }
+
+    await updateRequest(st.requestId, { operator: label });
+    setUserState(ctx.from.id, { step: 'OPERATOR_ID' });
+
+    await ctx.reply(
+      `✅ Operatore selezionato: *${label}*\n\nOra inserisci il tuo *ID operatore* (quello del conto sul bookmaker):`,
+      { parse_mode: 'Markdown' }
+    );
   } catch (e) {
     console.error(e);
     await ctx.reply(`❌ Errore: ${errToString(e)}`);
@@ -621,11 +711,9 @@ bot.action(/PRIZE_(.+)/, async (ctx) => {
     const count = Number(row.referrals_count || 0);
     if (count < 4) return ctx.reply('❌ Non hai ancora 4 persone portate. Non puoi richiedere premi.');
 
-    // scala 4 SOLO dallo spendibile
     const dec = await decrementReferralsBy4(userDbId);
     if (!dec.ok) return ctx.reply('❌ Non hai abbastanza persone (minimo 4).');
 
-    // registra richiesta premio (con id)
     const { data: redemption, error: insErr } = await supabase
       .from('invite_redemptions')
       .insert({
@@ -638,10 +726,7 @@ bot.action(/PRIZE_(.+)/, async (ctx) => {
       .single();
     if (insErr) throw insErr;
 
-    // notifica admin + pulsante "Premio Inviato"
-    const adminKb = Markup.inlineKeyboard([
-      [Markup.button.callback('✅ Premio inviato', `ADMIN_REWARD_SENT_${redemption.id}`)]
-    ]);
+    const adminKb = Markup.inlineKeyboard([[Markup.button.callback('✅ Premio inviato', `ADMIN_REWARD_SENT_${redemption.id}`)]]);
 
     for (const aid of adminIds) {
       try {
@@ -700,29 +785,6 @@ bot.action('SKIP_INVITE', async (ctx) => {
   await ctx.reply('Ok 👍\nOra invia lo screenshot del deposito (foto o file).');
 });
 
-// scelta operatore
-bot.action(/OP_(EUROBET|BWIN|BETSSON|STARCASINO)/, async (ctx) => {
-  try {
-    await ctx.answerCbQuery().catch(() => {});
-    const st = getUserState(ctx.from.id);
-    if (!st?.requestId) return ctx.reply('Sessione scaduta. Riparti dal menu.');
-
-    const key = String(ctx.match[1] || '').trim();
-    const label = operatorLabelFromKey(key);
-
-    await updateRequest(st.requestId, { operator: label });
-    setUserState(ctx.from.id, { step: 'OPERATOR_ID' });
-
-    await ctx.reply(
-      `✅ Operatore selezionato: *${label}*\n\nOra inserisci il tuo *ID operatore* (quello del conto sul bookmaker):`,
-      { parse_mode: 'Markdown' }
-    );
-  } catch (e) {
-    console.error(e);
-    await ctx.reply(`❌ Errore: ${errToString(e)}`);
-  }
-});
-
 bot.action('SUBMIT', async (ctx) => {
   try {
     await ctx.answerCbQuery();
@@ -731,9 +793,7 @@ bot.action('SUBMIT', async (ctx) => {
 
     await setStatus(st.requestId, 'SUBMITTED');
 
-    // ✅ IMPORTANTE: NON incrementiamo inviti qui.
-    // Gli inviti aumentano SOLO quando l'admin approva (ADMIN_APPROVE).
-
+    // ✅ NON incrementiamo inviti qui: SOLO su APPROVE
     const req = await getRequest(st.requestId);
     await notifyAdminsNewRequest(ctx, req);
 
@@ -756,6 +816,19 @@ bot.action(/ADMIN_APPROVE_(\d+)/, async (ctx) => {
 
   try {
     const req = await getRequest(requestId);
+
+    // ✅ BLOCCO ADMIN: se già APPROVED per lo stesso user+operatore, non approvare
+    if (safeText(req.operator || '').trim()) {
+      const dup = await hasApprovedForOperator(req.user_id, req.operator);
+      if (dup) {
+        await ctx.reply(
+          `❌ Non posso approvare: questo utente risulta già APPROVATO su questo operatore.\n` +
+            `UserID: ${req.user_id}\nOperatore: ${req.operator}\n\n` +
+            `Se vuoi permetterlo comunque (sconsigliato), devi gestirlo manualmente.`
+        );
+        return;
+      }
+    }
 
     // 1) approva
     await setStatus(requestId, 'APPROVED');
@@ -780,7 +853,6 @@ bot.action(/ADMIN_APPROVE_(\d+)/, async (ctx) => {
     // codice invito utente
     const userInvite = await ensureInviteCode(req.user_id);
 
-    // bottone “Premi Invito” SOLO DOPO APPROVAZIONE
     await bot.telegram.sendMessage(
       userTelegramId,
       `✅ Richiesta approvata!\n\n` +
@@ -847,7 +919,7 @@ bot.action(/ADMIN_ASK_(\d+)/, async (ctx) => {
 });
 
 // ===============================
-// ADMIN ACTION: Premio inviato (INVITE REDEMPTION)
+// ADMIN ACTION: Premio inviato
 // ===============================
 bot.action(/ADMIN_REWARD_SENT_(\d+)/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
@@ -857,7 +929,6 @@ bot.action(/ADMIN_REWARD_SENT_(\d+)/, async (ctx) => {
   if (!Number.isFinite(redemptionId)) return ctx.reply('ID redemption non valido.');
 
   try {
-    // carica redemption
     const { data: red, error: e1 } = await supabase
       .from('invite_redemptions')
       .select('id, user_id, prize_type, status')
@@ -870,7 +941,6 @@ bot.action(/ADMIN_REWARD_SENT_(\d+)/, async (ctx) => {
       return ctx.reply('ℹ️ Risulta già segnato come inviato.');
     }
 
-    // update DB
     const { error: e2 } = await supabase
       .from('invite_redemptions')
       .update({
@@ -881,7 +951,6 @@ bot.action(/ADMIN_REWARD_SENT_(\d+)/, async (ctx) => {
       .eq('id', redemptionId);
     if (e2) throw e2;
 
-    // notifica user
     try {
       const userTid = await getUserTelegramIdByUserId(red.user_id);
       await bot.telegram.sendMessage(
@@ -1066,8 +1135,22 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
 
       await updateRequest(st.requestId, { full_name: fullName });
 
+      // ✅ qui mostriamo SOLO operatori non ancora approvati per questo user
+      const approvedKeys = await getApprovedOperatorKeysForUser(st.userDbId);
+      const kb = operatorsKeyboard(approvedKeys);
+
       setUserState(tid, { step: 'OPERATOR' });
-      return ctx.reply('Seleziona l’operatore scelto:', operatorsKeyboard());
+
+      if (!kb?.reply_markup?.inline_keyboard?.length) {
+        clearUserState(tid);
+        return ctx.reply(
+          `⚠️ Risulti già autorizzato su tutti gli operatori disponibili.\n` +
+            `Se vuoi comunque riprovare, contatta il supporto.`,
+          { parse_mode: 'Markdown' }
+        );
+      }
+
+      return ctx.reply('Seleziona l’operatore scelto:', { reply_markup: kb.reply_markup });
     }
 
     if (st.step === 'OPERATOR_ID') {
