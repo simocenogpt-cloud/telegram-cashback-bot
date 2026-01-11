@@ -312,6 +312,20 @@ async function getInviteRowByCode(code) {
   return data;
 }
 
+// ✅ NUOVO: check esistenza codice invito (lato utente)
+async function validateInviteCodeExists(code) {
+  const normalized = safeText(code || '').trim().toUpperCase();
+  if (!normalized) return false;
+
+  try {
+    const row = await getInviteRowByCode(normalized);
+    return !!row?.id;
+  } catch (e) {
+    console.error('validateInviteCodeExists failed:', errToString(e));
+    return false;
+  }
+}
+
 async function rotateMonthlyCountersIfNeeded(inviteRow) {
   // logica: se updated_at è di un mese precedente, allora:
   // - referrals_prev_month = referrals_month (valore vecchio)
@@ -1224,7 +1238,16 @@ bot.on(['text', 'photo', 'document'], async (ctx) => {
         });
       }
 
-      await updateRequest(st.requestId, { invite_code: code.toUpperCase() });
+      // ✅ NUOVO CONTROLLO: verifica che il codice esista davvero
+      const normalized = code.toUpperCase();
+      const exists = await validateInviteCodeExists(normalized);
+      if (!exists) {
+        return ctx.reply('❌ Codice invito errato. Controlla che sia corretto.', {
+          reply_markup: skipInviteMenu.reply_markup
+        });
+      }
+
+      await updateRequest(st.requestId, { invite_code: normalized });
       setUserState(tid, { step: 'SCREENSHOT' });
       return ctx.reply('Perfetto ✅\nOra invia lo screenshot del deposito (foto o file).');
     }
