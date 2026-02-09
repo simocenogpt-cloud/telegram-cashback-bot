@@ -82,6 +82,7 @@ const OPERATORS = [
 function introMessage() {
   return `🔥 Richiesta accesso VIP + Premi 🔥
 
+
 🔍 Cosa facciamo nel VIP
 • Scansioniamo tutti i bookmakers ogni giorno per trovare errori di quota dei bookmakers
 • Postiamo schedine singole e doppie pronte 
