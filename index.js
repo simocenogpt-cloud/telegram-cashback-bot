@@ -82,7 +82,6 @@ const OPERATORS = [
 function introMessage() {
   return `🔥 Richiesta accesso VIP + Premi 🔥
 
-
 🔍 Cosa facciamo nel VIP
 • Scansioniamo tutti i bookmakers ogni giorno per trovare errori di quota dei bookmakers
 • Postiamo schedine singole e doppie pronte 
@@ -103,8 +102,9 @@ Amazon • Zalando • Airbnb • Apple • Spotify
 3️⃣ Clicca qui sotto INVIA RICHIESTA per mandare i dati del deposito appena effettuato
 
 ⏱️ Verifica: entro 72 ore.
-✅ Se la richiesta viene approvata, riceverai il link per entrare nel canale VIP.;
+✅ Se la richiesta viene approvata, riceverai il link per entrare nel canale VIP.`;
 }
+
 
 function inviteExplanationText(inviteCode) {
   return (
