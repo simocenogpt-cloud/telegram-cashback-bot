@@ -82,30 +82,27 @@ const OPERATORS = [
 function introMessage() {
   return `🔥 Richiesta accesso VIP + Premi 🔥
 
-Per partecipare:
-1️⃣ Registrati su UNO di questi link:
-• Eurobet: ${OPERATORS.find((o) => o.key === 'EUROBET')?.link}
-• bwin: ${OPERATORS.find((o) => o.key === 'BWIN')?.link}
-• Betsson: ${OPERATORS.find((o) => o.key === 'BETSSON')?.link}
-• Starcasino: ${OPERATORS.find((o) => o.key === 'STARCASINO')?.link}
+🔍 Cosa facciamo nel VIP
+• Scansioniamo tutti i bookmakers ogni giorno per trovare errori di quota dei bookmakers
+• Postiamo schedine singole e doppie pronte 
+• Migliori bonus sport e casino 
 
-2️⃣ Effettua un deposito (seguendo le regole della promo/link)
-3️⃣ Invia qui i dati richiesti + screenshot deposito
+🎁 Invita amici = guadagni buoni regalo
+Amazon • Zalando • Airbnb • Apple • Spotify
+10€ per ogni persona che porti.
+5 amici = 50€ in buoni regalo.
 
-🎁 Premi disponibili (buoni regalo):
-• Amazon
-• Zalando
-• Airbnb
-• Apple
-• Spotify
+🏁COME PARTECIPARE
+1️⃣ Registrati da UNO dei link sotto
+• Eurobet: https://record.betpartners.it/_Klv9utJ3bqpKqXDxdQZqW2Nd7ZgqdRLk/1/
+• bwin: https://www.bwin.it/it/engage/lan/s/p/sports/accaboost?wm=5596580
+• Betsson: https://record.betsson.it/_dYA2EWAR45qw8pi7H3I6R2Nd7ZgqdRLk/1/
+• Starcasino: https://record.starcasino.it/_dYA2EWAR45rPSO5RLscKcGNd7ZgqdRLk/1/
+2️⃣ Effettua un deposito di almeno 10 euro
+3️⃣ Clicca qui sotto INVIA RICHIESTA per mandare i dati del deposito appena effettuato
 
 ⏱️ Verifica: entro 72 ore.
-✅ Se la richiesta viene approvata, riceverai il link per entrare nel canale VIP.
-
-Regole:
-– Valido solo se usi uno dei link sopra
-– Una sola partecipazione per persona
-– Screenshot falsi o modificati = esclusione immediata`;
+✅ Se la richiesta viene approvata, riceverai il link per entrare nel canale VIP.;
 }
 
 function inviteExplanationText(inviteCode) {
